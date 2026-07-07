@@ -11,35 +11,43 @@ jobs:
     runs-on: windows-2019
 
     steps:
-    # 1. исходный код 
+    # 1. Исходный код 
     - name: Checkout plugin source
       uses: actions/checkout@v4
 
-    # 2. SDK и Project Tool
+    # 2. SDK и Project Tool (Оптимизировано по скорости)
     - name: Download and Setup SDK & Project Tool
       shell: powershell
+      timeout-minutes: 15
       run: |
+        # КРИТИЧНО: Отключаем прорисовку прогресс-баров, которая вешает GitHub Actions
+        $ProgressPreference = 'SilentlyContinue'
+        
         New-Item -ItemType Directory -Force -Path C:\c4d_build
         
-        # SDK R21
+        # Скачивание SDK R21
         Write-Host "Downloading Cinema 4D R21 SDK..."
         Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/Cinema_4D_CPP_SDK_21_207.zip" -OutFile C:\c4d_build\sdk.zip
         
-        Write-Host "Extracting SDK..."
-        Expand-Archive -Path C:\c4d_build\sdk.zip -DestinationPath C:\c4d_build\sdk_extracted
+        # Распаковка через встроенный в Windows 'tar' (работает в 20 раз быстрее, чем Expand-Archive)
+        Write-Host "Extracting SDK using tar..."
+        New-Item -ItemType Directory -Force -Path C:\c4d_build\sdk_extracted
+        tar -xf C:\c4d_build\sdk.zip -C C:\c4d_build\sdk_extracted
         
-        # Project Tool R21
+        # Скачивание Project Tool R21
         Write-Host "Downloading Project Tool R21..."
         Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/ProjectTool_R21.zip" -OutFile C:\c4d_build\pt.zip
         
-        Write-Host "Extracting Project Tool..."
-        Expand-Archive -Path C:\c4d_build\pt.zip -DestinationPath C:\c4d_build\project_tool
+        # Распаковка Project Tool
+        Write-Host "Extracting Project Tool using tar..."
+        New-Item -ItemType Directory -Force -Path C:\c4d_build\project_tool
+        tar -xf C:\c4d_build\pt.zip -C C:\c4d_build\project_tool
         
-        # корень SDK
+        # Поиск корня SDK
         $sdkRoot = Get-ChildItem -Path C:\c4d_build\sdk_extracted -Filter "frameworks" -Recurse | Select-Object -First 1 -ExpandProperty Parent
         Write-Host "SDK Root found at: $($sdkRoot.FullName)"
         
-        # plugins
+        # Создание папки plugins
         $pluginsDir = Join-Path $sdkRoot.FullName "plugins"
         if (!(Test-Path $pluginsDir)) {
             New-Item -ItemType Directory -Path $pluginsDir | Out-Null
@@ -53,20 +61,20 @@ jobs:
         Copy-Item -Path "$env:GITHUB_WORKSPACE\res" -Destination (Join-Path $myPluginDir "res") -Recurse -Force
         Copy-Item -Path "$env:GITHUB_WORKSPACE\source" -Destination (Join-Path $myPluginDir "source") -Recurse -Force
         
-        #  пути в переменные
+        # Передаем пути в переменные окружения для следующих шагов
         echo "SDK_ROOT=$($sdkRoot.FullName)" >> $env:GITHUB_ENV
         echo "PLUGIN_DIR=$myPluginDir" >> $env:GITHUB_ENV
 
     # 3. Запуск Maxon Project Tool для генерации файлов .sln и .vcxproj
     - name: Run Maxon Project Tool
       shell: powershell
+      timeout-minutes: 5
       run: |
-        # kernel_app.exe
         $ptExe = Get-ChildItem -Path C:\c4d_build\project_tool -Filter "kernel_app.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
         Write-Host "Running Project Tool: $ptExe"
         
-        # генрация решения
-        & $ptExe g_updateproject="$env:SDK_ROOT"
+        # Передаем пустую строку на вход утилите, чтобы она гарантированно не ждала нажатия клавиш (STDIN) при ошибках
+        "" | & $ptExe g_updateproject="$env:SDK_ROOT"
 
     # 4. Настройка MSBuild в окружении
     - name: Setup MSBuild
@@ -75,12 +83,13 @@ jobs:
     # 5. Компиляция проекта через MSBuild
     - name: Build Plugin Solution
       shell: powershell
+      timeout-minutes: 20
       run: |
         $slnPath = Join-Path $env:SDK_ROOT "project\project.sln"
         Write-Host "Building master solution: $slnPath"
         
-        # сборка
-        msbuild $slnPath /p:Configuration=Release /p:Platform=x64
+        # Добавлен флаг /m для многопоточной сборки на всех доступных ядрах процессора
+        msbuild $slnPath /p:Configuration=Release /p:Platform=x64 /m
 
     # 6. Публикация готового артефакта сборки (.xdl64 и папка ресурсов)
     - name: Upload Build Artifacts
