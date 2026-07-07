@@ -1,0 +1,9 @@
+Platform=Win64
+Type=DLL
+C4D=true
+
+APIS=cinema.framework;core.framework;mesh_misc.framework
+
+stylecheck.level=0
+
+ModuleId=com.example.geometryprojector

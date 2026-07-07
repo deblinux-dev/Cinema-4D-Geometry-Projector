@@ -1,0 +1,10 @@
+STRINGTABLE Xprojectionshader
+{
+    Xprojectionshader "Projection Shader";
+    SHADER_PROJECTOR_LINK "Projector Object";
+    SHADER_BLEND_MODE "Blend Mode";
+    BLEND_REPLACE "Replace";
+    BLEND_MULTIPLY "Multiply";
+    BLEND_ADD "Add";
+    BLEND_OVERLAY "Overlay";
+}

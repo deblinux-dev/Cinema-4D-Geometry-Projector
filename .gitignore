@@ -1,0 +1,28 @@
+# Бинарники и сборка
+*.xdl64
+*.dylib
+*.so
+build/
+x64/
+Win64/
+Release/
+Debug/
+*.pdb
+*.iobj
+*.ipdb
+
+# Файлы проектов
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Конфигурации IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.ncb
+*.opensdf
+*.sdf
