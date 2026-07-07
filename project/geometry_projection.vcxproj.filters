@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="generated">
+      <UniqueIdentifier>{9234BE18-BF3C-3D38-0000-5284111A998F}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="generated\hxx">
+      <UniqueIdentifier>{9234BE18-BF3C-3D38-8ACC-618A6830A19B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="res">
+      <UniqueIdentifier>{9234BE18-BF3C-3D38-0000-00000001B8A0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="res\description">
+      <UniqueIdentifier>{9234BE18-BF3C-3D38-9C54-D849A21EBAC0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="source">
+      <UniqueIdentifier>{9234BE18-BF3C-3D38-0000-0000CA90681B}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\generated\hxx\interface_registration.cpp">
+      <Filter>generated\hxx</Filter>
+    </ClCompile>
+    <ClCompile Include="..\generated\hxx\register.cpp">
+      <Filter>generated\hxx</Filter>
+    </ClCompile>
+    <ClCompile Include="..\source\geometry_collector.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\source\geometry_projector.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\source\main.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\source\projection_shader.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\source\projector_object.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\source\rasterizer.cpp">
+      <Filter>source</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\res\c4d_symbols.h">
+      <Filter>res</Filter>
+    </ClInclude>
+    <ClInclude Include="..\res\description\Ogeometryprojector.h">
+      <Filter>res\description</Filter>
+    </ClInclude>
+    <ClInclude Include="..\res\description\Xprojectionshader.h">
+      <Filter>res\description</Filter>
+    </ClInclude>
+    <ClInclude Include="..\source\geometry_collector.h">
+      <Filter>source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\source\geometry_projector.h">
+      <Filter>source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\source\projection_cache.h">
+      <Filter>source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\source\projection_shader.h">
+      <Filter>source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\source\projector_object.h">
+      <Filter>source</Filter>
+    </ClInclude>
+    <ClInclude Include="..\source\rasterizer.h">
+      <Filter>source</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

@@ -11,12 +11,6 @@ Debug/
 *.iobj
 *.ipdb
 
-# Файлы проектов
-*.sln
-*.vcxproj
-*.vcxproj.filters
-*.vcxproj.user
-
 # Конфигурации IDE
 .vs/
 .vscode/
