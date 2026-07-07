@@ -1,0 +1,92 @@
+name: Build Cinema 4D R21 Plugin
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-windows:
+    runs-on: windows-2019
+
+    steps:
+    # 1. исходный код 
+    - name: Checkout plugin source
+      uses: actions/checkout@v4
+
+    # 2. SDK и Project Tool
+    - name: Download and Setup SDK & Project Tool
+      shell: powershell
+      run: |
+        New-Item -ItemType Directory -Force -Path C:\c4d_build
+        
+        # SDK R21
+        Write-Host "Downloading Cinema 4D R21 SDK..."
+        Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/Cinema_4D_CPP_SDK_21_207.zip" -OutFile C:\c4d_build\sdk.zip
+        
+        Write-Host "Extracting SDK..."
+        Expand-Archive -Path C:\c4d_build\sdk.zip -DestinationPath C:\c4d_build\sdk_extracted
+        
+        # Project Tool R21
+        Write-Host "Downloading Project Tool R21..."
+        Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/ProjectTool_R21.zip" -OutFile C:\c4d_build\pt.zip
+        
+        Write-Host "Extracting Project Tool..."
+        Expand-Archive -Path C:\c4d_build\pt.zip -DestinationPath C:\c4d_build\project_tool
+        
+        # корень SDK
+        $sdkRoot = Get-ChildItem -Path C:\c4d_build\sdk_extracted -Filter "frameworks" -Recurse | Select-Object -First 1 -ExpandProperty Parent
+        Write-Host "SDK Root found at: $($sdkRoot.FullName)"
+        
+        # plugins
+        $pluginsDir = Join-Path $sdkRoot.FullName "plugins"
+        if (!(Test-Path $pluginsDir)) {
+            New-Item -ItemType Directory -Path $pluginsDir | Out-Null
+        }
+        
+        # Копируем код нашего плагина во внутреннюю структуру SDK
+        $myPluginDir = Join-Path $pluginsDir "geometry_projector"
+        New-Item -ItemType Directory -Path $myPluginDir | Out-Null
+        
+        Copy-Item -Path "$env:GITHUB_WORKSPACE\project" -Destination (Join-Path $myPluginDir "project") -Recurse -Force
+        Copy-Item -Path "$env:GITHUB_WORKSPACE\res" -Destination (Join-Path $myPluginDir "res") -Recurse -Force
+        Copy-Item -Path "$env:GITHUB_WORKSPACE\source" -Destination (Join-Path $myPluginDir "source") -Recurse -Force
+        
+        #  пути в переменные
+        echo "SDK_ROOT=$($sdkRoot.FullName)" >> $env:GITHUB_ENV
+        echo "PLUGIN_DIR=$myPluginDir" >> $env:GITHUB_ENV
+
+    # 3. Запуск Maxon Project Tool для генерации файлов .sln и .vcxproj
+    - name: Run Maxon Project Tool
+      shell: powershell
+      run: |
+        # kernel_app.exe
+        $ptExe = Get-ChildItem -Path C:\c4d_build\project_tool -Filter "kernel_app.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+        Write-Host "Running Project Tool: $ptExe"
+        
+        # генрация решения
+        & $ptExe g_updateproject="$env:SDK_ROOT"
+
+    # 4. Настройка MSBuild в окружении
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    # 5. Компиляция проекта через MSBuild
+    - name: Build Plugin Solution
+      shell: powershell
+      run: |
+        $slnPath = Join-Path $env:SDK_ROOT "project\project.sln"
+        Write-Host "Building master solution: $slnPath"
+        
+        # сборка
+        msbuild $slnPath /p:Configuration=Release /p:Platform=x64
+
+    # 6. Публикация готового артефакта сборки (.xdl64 и папка ресурсов)
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: geometry_projector_r21_win64
+        path: |
+          ${{ env:PLUGIN_DIR }}/**/*.xdl64
+          ${{ env:PLUGIN_DIR }}/res/
