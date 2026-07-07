@@ -15,26 +15,54 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
+    - name: Sanitize and Generate Headers
+      shell: powershell
+      run: |
+        $RootDir = "${{ github.workspace }}"
+        
+        # 1. ОЧИСТКА ОТ КИРИЛЛИЦЫ
+        # Source Processor (Python) упадет, если увидит русские буквы. Вырезаем их.
+        Write-Host "Sanitizing source files to ASCII..."
+        $exts = @("*.cpp", "*.h", "*.res", "*.str", "*.hxx")
+        Get-ChildItem -Path "$RootDir" -Include $exts -Recurse | ForEach-Object {
+            $content = Get-Content $_.FullName
+            $clean = foreach ($line in $content) { [System.Text.RegularExpressions.Regex]::Replace($line, "[^\x00-\x7F]", "") }
+            $clean | Set-Content $_.FullName -Encoding Ascii
+        }
+
+        # 2. ЗАПУСК SOURCE PROCESSOR
+        # Это создаст те самые system1.hxx и прочие файлы
+        $pyExe = Join-Path $RootDir "frameworks\settings\sourceprocessor\Python36\python.exe"
+        $pyScript = Join-Path $RootDir "frameworks\settings\sourceprocessor\sourceprocessor.py"
+        
+        $fws = @("core.framework", "cinema.framework", "mesh_misc.framework")
+        foreach ($fw in $fws) {
+            $path = Join-Path $RootDir "frameworks\$fw"
+            Write-Host "Processing $fw..."
+            & $pyExe $pyScript $path
+        }
+        
+        # Также обработаем сам плагин
+        Write-Host "Processing plugin..."
+        & $pyExe $pyScript (Join-Path $RootDir "plugins\geometry_projection")
+
     - name: Build Plugin
       shell: powershell
       run: |
-        # Корень репозитория теперь и есть корень SDK
-        $env:MAXON_ROOTDIR = "${{ github.workspace }}"
+        $RootDir = "${{ github.workspace }}"
+        $env:MAXON_ROOTDIR = $RootDir
         
-        # Находим ваш файл проекта внутри репозитория
+        # Находим vcxproj
         $vcxPath = Get-ChildItem -Path "plugins" -Filter "*.vcxproj" -Recurse | Select-Object -First 1 -ExpandProperty FullName
-        Write-Host "Found project: $vcxPath"
+        
+        # Подавляем все новые варнинги VS 2022, чтобы они не стопили билд
+        $env:CL = "/wd5220 /wd5219 /wd4003 /wd4834 /wd4477 /wd5204 /wd5267 /wd4244 /wd4267"
 
-        # Отключаем все капризные предупреждения нового компилятора
-        $env:CL = "/wd5220 /wd5219 /wd4003 /wd4834 /wd4477 /wd4244 /wd4267"
-
-        # Просто собираем!
-        # /p:BuildProjectReferences=true соберет и фреймворки, раз они в репо
         msbuild $vcxPath `
           /p:Configuration=Release `
           /p:Platform=x64 `
           /p:PlatformToolset=v143 `
-          /p:MAXON_ROOTDIR="$env:MAXON_ROOTDIR" `
+          /p:MAXON_ROOTDIR="$RootDir" `
           /p:TreatWarningsAsErrors=false `
           /m
 
