@@ -1,6 +1,8 @@
 name: Build Plugin
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ "main" ]
 
 jobs:
   build:
@@ -13,25 +15,33 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Download SDK Base
+    - name: Build Plugin
       shell: powershell
       run: |
-        # Нам нужны только базовые ресурсы SDK, проекты мы принесли с собой
-        $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/Cinema_4D_CPP_SDK_21_207.zip" -OutFile sdk.zip
-        Expand-Archive -Path sdk.zip -DestinationPath C:\sdk_base -Force
-
-    - name: Run Build Script
-      shell: powershell
-      run: |
-        # Копируем папку resource из чистого SDK к нам (она нужна для компиляции)
-        Copy-Item -Path "C:\sdk_base\Cinema_4D_CPP_SDK_21_207\resource" -Destination ".\resource" -Recurse -Force
+        # Корень репозитория теперь и есть корень SDK
+        $env:MAXON_ROOTDIR = "${{ github.workspace }}"
         
-        # Запускаем наш нормальный скрипт
-        .\build.ps1
+        # Находим ваш файл проекта внутри репозитория
+        $vcxPath = Get-ChildItem -Path "plugins" -Filter "*.vcxproj" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+        Write-Host "Found project: $vcxPath"
+
+        # Отключаем все капризные предупреждения нового компилятора
+        $env:CL = "/wd5220 /wd5219 /wd4003 /wd4834 /wd4477 /wd4244 /wd4267"
+
+        # Просто собираем!
+        # /p:BuildProjectReferences=true соберет и фреймворки, раз они в репо
+        msbuild $vcxPath `
+          /p:Configuration=Release `
+          /p:Platform=x64 `
+          /p:PlatformToolset=v143 `
+          /p:MAXON_ROOTDIR="$env:MAXON_ROOTDIR" `
+          /p:TreatWarningsAsErrors=false `
+          /m
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: geometry_projection
-        path: plugins/geometry_projection/project/geometry_projection.xdl64
+        name: geometry_projection_win64
+        path: |
+          plugins/**/*.xdl64
+          plugins/**/res/
