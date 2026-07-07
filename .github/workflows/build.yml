@@ -1,122 +1,37 @@
-name: Build Cinema 4D R21 Plugin
+name: Build Plugin
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+on: [push, pull_request]
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
 
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Cache C4D SDK
-      id: cache-sdk
-      uses: actions/cache@v4
-      with:
-        path: C:\c4d_build\sdk_extracted
-        key: c4d-sdk-r21-final-v3
-
-    - name: Download SDK
-      if: steps.cache-sdk.outputs.cache-hit != 'true'
-      shell: powershell
-      run: |
-        $ProgressPreference = 'SilentlyContinue'
-        New-Item -ItemType Directory -Force -Path C:\c4d_build | Out-Null
-        Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/Cinema_4D_CPP_SDK_21_207.zip" -OutFile C:\c4d_build\sdk.zip
-        Expand-Archive -Path C:\c4d_build\sdk.zip -DestinationPath C:\c4d_build\sdk_extracted -Force
-
-    - name: Setup SDK and Generate Headers
-      shell: powershell
-      env:
-        PYTHONIOENCODING: utf-8
-        PYTHONUTF8: 1
-      run: |
-        $sdkRoot = Get-ChildItem -Path C:\c4d_build\sdk_extracted -Filter "frameworks" -Recurse | Select-Object -First 1 -ExpandProperty Parent
-        $pluginsDir = Join-Path $sdkRoot.FullName "plugins"
-        
-        # 1. Setup plugin folder
-        $myPluginDir = Join-Path $pluginsDir "geometry_projection"
-        if (Test-Path $myPluginDir) { Remove-Item $myPluginDir -Recurse -Force }
-        New-Item -ItemType Directory -Path $myPluginDir -Force | Out-Null
-        Copy-Item -Path "$env:GITHUB_WORKSPACE\*" -Destination $myPluginDir -Recurse -Force
-
-        # 2. Sanitize source files (Remove Cyrillic for Python)
-        $files = Get-ChildItem -Path $myPluginDir -Include *.cpp,*.h,*.res,*.str -Recurse
-        foreach ($file in $files) {
-            $content = Get-Content $file.FullName
-            $cleanContent = foreach ($line in $content) {
-                [System.Text.RegularExpressions.Regex]::Replace($line, "[^\x00-\x7F]", "")
-            }
-            $cleanContent | Set-Content $file.FullName -Encoding Ascii
-        }
-
-        # 3. MANUAL STEP: Run Source Processor for Frameworks
-        # Это создаст те самые .hxx файлы (system1.hxx и др.) внутри SDK
-        $pyExe = Join-Path $sdkRoot.FullName "frameworks\settings\sourceprocessor\Python36\python.exe"
-        $pyScript = Join-Path $sdkRoot.FullName "frameworks\settings\sourceprocessor\sourceprocessor.py"
-        $fws = @("core.framework", "cinema.framework", "mesh_misc.framework")
-        
-        foreach ($fw in $fws) {
-            Write-Host "Generating headers for $fw..."
-            $fwPath = Join-Path $sdkRoot.FullName "frameworks\$fw"
-            & $pyExe $pyScript $fwPath
-        }
-
-        # 4. Create .props files for MSBuild
-        foreach ($fw in $fws) {
-            $fwProjDir = Join-Path $sdkRoot.FullName "frameworks\$fw\project"
-            if (!(Test-Path $fwProjDir)) { New-Item -ItemType Directory -Path $fwProjDir -Force | Out-Null }
-            $xml = @(
-                '<?xml version="1.0" encoding="utf-8"?>',
-                '<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">',
-                '  <PropertyGroup><ItemDefinitionGroup><ClCompile>',
-                '    <AdditionalIncludeDirectories>$(MAXON_ROOTDIR)\frameworks\' + $fw + '\source;$(MAXON_ROOTDIR)\frameworks\' + $fw + '\generated\hxx;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>',
-                '  </ClCompile></ItemDefinitionGroup></PropertyGroup>',
-                '</Project>'
-            )
-            $xml | Set-Content -Path (Join-Path $fwProjDir "$fw.includes.props") -Encoding Ascii
-        }
-
-        echo "SDK_ROOT=$($sdkRoot.FullName)" >> $env:GITHUB_ENV
-        echo "PLUGIN_DIR=$myPluginDir" >> $env:GITHUB_ENV
-
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Build Plugin
+    - name: Download SDK Base
       shell: powershell
       run: |
-        $target = Get-ChildItem -Path $env:PLUGIN_DIR -Include "*.sln","*.vcxproj" -Recurse | Select-Object -First 1 -ExpandProperty FullName
-        
-        # Final trick: Include ALL paths in the system INCLUDE environment variable
-        $incCinema = Join-Path $env:SDK_ROOT "frameworks\cinema.framework\source"
-        $incCinemaHxx = Join-Path $env:SDK_ROOT "frameworks\cinema.framework\generated\hxx"
-        $incCore = Join-Path $env:SDK_ROOT "frameworks\core.framework\source"
-        $incCoreHxx = Join-Path $env:SDK_ROOT "frameworks\core.framework\generated\hxx"
-        $incMesh = Join-Path $env:SDK_ROOT "frameworks\mesh_misc.framework\source"
-        $incMeshHxx = Join-Path $env:SDK_ROOT "frameworks\mesh_misc.framework\generated\hxx"
-        
-        $env:INCLUDE = "$incCinema;$incCinemaHxx;$incCore;$incCoreHxx;$incMesh;$incMeshHxx;$env:INCLUDE"
-        $env:CL = "/wd5220 /wd5219 /wd4003 /wd4834"
+        # Нам нужны только базовые ресурсы SDK, проекты мы принесли с собой
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://developers.maxon.net/downloads/Cinema_4D_CPP_SDK_21_207.zip" -OutFile sdk.zip
+        Expand-Archive -Path sdk.zip -DestinationPath C:\sdk_base -Force
 
-        msbuild $target `
-          /p:Configuration=Release `
-          /p:Platform=x64 `
-          /p:PlatformToolset=v143 `
-          /p:MAXON_ROOTDIR="$env:SDK_ROOT" `
-          /p:BuildProjectReferences=false `
-          /p:TreatWarningsAsErrors=false `
-          /m
+    - name: Run Build Script
+      shell: powershell
+      run: |
+        # Копируем папку resource из чистого SDK к нам (она нужна для компиляции)
+        Copy-Item -Path "C:\sdk_base\Cinema_4D_CPP_SDK_21_207\resource" -Destination ".\resource" -Recurse -Force
+        
+        # Запускаем наш нормальный скрипт
+        .\build.ps1
 
-    - name: Upload Artifacts
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: geometry_projection_win64
-        path: |
-          ${{ env.PLUGIN_DIR }}/**/*.xdl64
-          ${{ env.PLUGIN_DIR }}/res/
+        name: geometry_projection
+        path: plugins/geometry_projection/project/geometry_projection.xdl64
