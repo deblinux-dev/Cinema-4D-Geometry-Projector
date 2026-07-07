@@ -88,5 +88,5 @@ jobs:
       with:
         name: geometry_projector_r21_win64
         path: |
-          ${{ env:PLUGIN_DIR }}/**/*.xdl64
-          ${{ env:PLUGIN_DIR }}/res/
+          ${{ env.PLUGIN_DIR }}/**/*.xdl64
+          ${{ env.PLUGIN_DIR }}/res/
