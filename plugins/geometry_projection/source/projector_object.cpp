@@ -151,7 +151,6 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
 
     if (!dirty)
     {
-        // ИСПРАВЛЕНИЕ: C-style cast обходит проблему с const
         InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
         if (srcList)
         {
@@ -336,8 +335,9 @@ void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)
 
     mat->InsertShader(shader);
     
-    doc->AddUndo(UNDOTYPE_NEW, shader);
-    doc->AddUndo(UNDOTYPE_CHANGE, mat);
+    // ИСПРАВЛЕНИЕ: Точный синтаксис R21 для Undo (через ::)
+    doc->AddUndo(UNDOTYPE::NEW, shader);
+    doc->AddUndo(UNDOTYPE::CHANGE, mat);
 
     BaseContainer* matData = mat->GetDataInstance();
     if (matData)

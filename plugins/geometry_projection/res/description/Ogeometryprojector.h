@@ -26,7 +26,7 @@ enum
     PROJ_AUTO_FIT           = 1103,
     PROJ_INVERT_X           = 1104,
     PROJ_INVERT_Y           = 1105,
-    PROJ_CAMERA_LINK        = 1106,  // Изменение #7: явная ссылка на камеру
+    PROJ_CAMERA_LINK        = 1106, 
 
     PROJ_MODE_FLAT_X        = 0,
     PROJ_MODE_FLAT_Y        = 1,
@@ -58,7 +58,6 @@ enum
     SHOW_BOUNDS             = 1303,
     DEBUG_OUTPUT            = 1304,
 
-    // Изменение #5: расширенный диапазон preview-разрешений (32px–2048px)
     PREVIEW_RES_32          = 0,
     PREVIEW_RES_64          = 1,
     PREVIEW_RES_128         = 2,
