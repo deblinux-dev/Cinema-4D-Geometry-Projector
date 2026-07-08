@@ -63,6 +63,11 @@ jobs:
           /p:TreatWarningsAsErrors=false `
           /m
 
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::MSBuild failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+        }
+
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:

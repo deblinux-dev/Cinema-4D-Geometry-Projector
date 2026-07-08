@@ -11,11 +11,11 @@ STRINGTABLE Ogeometryprojector
     SOURCE_OBJECTS "Source Objects";
     TARGET_MATERIAL "Target Material";
     TARGET_CHANNEL "Target Channel";
-    CHANNEL_COLOR "Color";
-    CHANNEL_LUMINANCE "Luminance";
-    CHANNEL_ALPHA "Alpha";
-    CHANNEL_BUMP "Bump";
-    CHANNEL_DIFFUSION "Diffusion";
+    TCH_COLOR "Color";
+    TCH_LUMINANCE "Luminance";
+    TCH_ALPHA "Alpha";
+    TCH_BUMP "Bump";
+    TCH_DIFFUSION "Diffusion";
     PROJ_MODE "Projection Mode";
     PROJ_MODE_FLAT_X "Flat X (Side)";
     PROJ_MODE_FLAT_Y "Flat Y (Top)";

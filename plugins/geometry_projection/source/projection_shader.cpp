@@ -176,3 +176,14 @@ Vector ProjectionShader::CheckerPattern(Float u, Float v)
     Float c = ((iu + iv) % 2 == 0) ? 0.4 : 0.6;
     return Vector(c, c, c);
 }
+
+// ==================== Registration ====================
+
+Bool RegisterProjectionShader()
+{
+    if (!RegisterShaderPlugin(PLUGIN_ID_PROJECTION_SHADER, "Projection Shader"_s,
+            0, ProjectionShader::Alloc, "Xprojectionshader"_s, 0))
+        return false;
+
+    return true;
+}

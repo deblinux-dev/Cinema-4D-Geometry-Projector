@@ -12,8 +12,8 @@ CONTAINER Ogeometryprojector
         {
             CYCLE
             {
-                CHANNEL_COLOR; CHANNEL_LUMINANCE; CHANNEL_ALPHA;
-                CHANNEL_BUMP; CHANNEL_DIFFUSION;
+                TCH_COLOR; TCH_LUMINANCE; TCH_ALPHA;
+                TCH_BUMP; TCH_DIFFUSION;
             }
         }
     }

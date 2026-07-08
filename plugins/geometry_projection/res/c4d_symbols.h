@@ -14,11 +14,11 @@ enum
     TARGET_MATERIAL         = 1002,
     TARGET_CHANNEL          = 1003,
 
-    CHANNEL_COLOR           = 0,
-    CHANNEL_LUMINANCE       = 1,
-    CHANNEL_ALPHA           = 2,
-    CHANNEL_BUMP            = 3,
-    CHANNEL_DIFFUSION       = 4,
+    TCH_COLOR               = 0,
+    TCH_LUMINANCE           = 1,
+    TCH_ALPHA               = 2,
+    TCH_BUMP                = 3,
+    TCH_DIFFUSION           = 4,
 
     PROJ_MODE               = 1101,
     PROJ_DIRECTION          = 1102,

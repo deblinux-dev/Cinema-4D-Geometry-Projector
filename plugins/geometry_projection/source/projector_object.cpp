@@ -14,11 +14,11 @@ static Int32 GetMaterialChannelId(Int32 channelParam)
 {
     switch (channelParam)
     {
-        case CHANNEL_COLOR:     return MATERIAL_COLOR_SHADER;
-        case CHANNEL_LUMINANCE: return MATERIAL_LUMINANCE_SHADER;
-        case CHANNEL_ALPHA:     return MATERIAL_ALPHA_SHADER;
-        case CHANNEL_BUMP:      return MATERIAL_BUMP_SHADER;
-        case CHANNEL_DIFFUSION: return MATERIAL_DIFFUSION_SHADER;
+        case TCH_COLOR:     return MATERIAL_COLOR_SHADER;
+        case TCH_LUMINANCE: return MATERIAL_LUMINANCE_SHADER;
+        case TCH_ALPHA:     return MATERIAL_ALPHA_SHADER;
+        case TCH_BUMP:      return MATERIAL_BUMP_SHADER;
+        case TCH_DIFFUSION: return MATERIAL_DIFFUSION_SHADER;
         default:                return MATERIAL_COLOR_SHADER;
     }
 }
@@ -29,11 +29,11 @@ static Int32 GetChannelUseFlag(Int32 channelParam)
 {
     switch (channelParam)
     {
-        case CHANNEL_COLOR:     return MATERIAL_USE_COLOR;
-        case CHANNEL_LUMINANCE: return MATERIAL_USE_LUMINANCE;
-        case CHANNEL_ALPHA:     return MATERIAL_USE_ALPHA;
-        case CHANNEL_BUMP:      return MATERIAL_USE_BUMP;
-        case CHANNEL_DIFFUSION: return MATERIAL_USE_DIFFUSION;
+        case TCH_COLOR:     return MATERIAL_USE_COLOR;
+        case TCH_LUMINANCE: return MATERIAL_USE_LUMINANCE;
+        case TCH_ALPHA:     return MATERIAL_USE_ALPHA;
+        case TCH_BUMP:      return MATERIAL_USE_BUMP;
+        case TCH_DIFFUSION: return MATERIAL_USE_DIFFUSION;
         default:                return MATERIAL_USE_COLOR;
     }
 }
@@ -55,7 +55,7 @@ Bool GeometryProjectorObject::Init(GeListNode* node)
     data->SetInt64(PARAM_CACHE_ID, m_cacheId);
 
     // Default values
-    data->SetInt32(TARGET_CHANNEL,      CHANNEL_COLOR);
+    data->SetInt32(TARGET_CHANNEL,      TCH_COLOR);
     data->SetInt32(PROJ_MODE,           PROJ_MODE_FLAT_Z);
     data->SetVector(PROJ_DIRECTION,     Vector(0, 0, 1));
     data->SetBool(PROJ_AUTO_FIT,        true);
@@ -331,7 +331,7 @@ void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)
         shaderData->SetLink(SHADER_PROJECTOR_LINK, op);
     }
 
-    Int32 channelParam = data->GetInt32(TARGET_CHANNEL, CHANNEL_COLOR);
+    Int32 channelParam = data->GetInt32(TARGET_CHANNEL, TCH_COLOR);
     Int32 channelShaderId = GetMaterialChannelId(channelParam);
 
     doc->StartUndo();
@@ -557,4 +557,28 @@ void GeometryProjectorObject::DrawBounds(BaseObject* op, BaseDraw* bd, BaseDrawH
 
     for (auto& e : edges)
         bd->DrawLine(corners[e[0]], corners[e[1]], 0);
+}
+
+// ==================== Registration ====================
+
+Bool RegisterGeometryProjectorObject()
+{
+    // Try to load the icon from res/icons/. Non-fatal: if it fails the plugin
+    // still registers, just without a custom icon in the Object Manager.
+    BaseBitmap* icon = BaseBitmap::Alloc();
+    if (icon)
+    {
+        if (icon->Init(GeGetPluginResourcePath() + "icons/ogeometryprojector.png"_s) != IMAGERESULT::OK)
+        {
+            BaseBitmap::Free(icon);
+            icon = nullptr;
+        }
+    }
+
+    if (!RegisterObjectPlugin(PLUGIN_ID_PROJECTOR_OBJECT, "Geometry Projector"_s,
+            OBJECT_GENERATOR, GeometryProjectorObject::Alloc,
+            "Ogeometryprojector"_s, icon, 0))
+        return false;
+
+    return true;
 }
