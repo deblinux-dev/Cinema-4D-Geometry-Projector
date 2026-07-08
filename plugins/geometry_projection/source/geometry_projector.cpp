@@ -81,12 +81,27 @@ ProjectionSettings ProjectionSettings::FromContainer(BaseContainer* bc, Int32 re
         }
     }
 
+    // autoFit = true  -> project geometry onto the target object's WORLD-space
+    //                    bounding box, preserving real proportions (a 1x1 cube
+    //                    on a 10x10 plane occupies 0.1x0.1 of UV).
+    // autoFit = false -> stretch the geometry's own bounds to fill [0..1] UV
+    //                    (user-driven layout via UV Offset/Scale).
+    // Note: GetMp()/GetRad() return LOCAL-space bounds, so they must be
+    // transformed through the target's world matrix (position + scale + rotation).
     s.hasTargetBounds = false;
-    if (targetObj && !s.autoFit)
+    if (targetObj && s.autoFit)
     {
-        s.targetBoundsCenter = targetObj->GetMp();
-        s.targetBoundsRad    = targetObj->GetRad();
-        s.hasTargetBounds    = true;
+        Matrix mg = targetObj->GetMg();
+        s.targetBoundsCenter = mg * targetObj->GetMp();
+        Vector rad = targetObj->GetRad();
+        // Half-extents scaled by the world-matrix axis lengths so a scaled
+        // or rotated target still yields correct world-space bounds.
+        s.targetBoundsRad = Vector(
+            rad.x * mg.sqmat.v1.GetLength(),
+            rad.y * mg.sqmat.v2.GetLength(),
+            rad.z * mg.sqmat.v3.GetLength()
+        );
+        s.hasTargetBounds = true;
     }
 
     return s;

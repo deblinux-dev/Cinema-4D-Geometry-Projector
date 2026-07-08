@@ -140,6 +140,64 @@ Bool GeometryProjectorObject::CopyTo(NodeData* dest, GeListNode* snode, GeListNo
     return SUPER::CopyTo(dest, snode, dnode, flags, trn);
 }
 
+// ==================== CheckDirty ====================
+
+// C4D only calls GetVirtualObjects() when this object is dirty. Source objects
+// live in an InExclude list (they are NOT children), so C4D has no automatic
+// dependency tracking for them. CheckDirty() is polled by C4D on the main
+// thread; by comparing the combined dirty checksum of all source objects (and
+// the camera in camera mode) against the last seen value, we can detect their
+// transforms/edits and mark this generator dirty, which triggers
+// GetVirtualObjects() -> DoUpdate() -> bitmap rebuild -> material refresh.
+void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
+{
+    BaseContainer* data = op->GetDataInstance();
+    if (!data || !doc) return;
+
+    UInt32 sum = 0;
+
+    // Source objects (geometry to project)
+    InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
+    if (srcList)
+    {
+        Int32 cnt = srcList->GetObjectCount();
+        for (Int32 i = 0; i < cnt; i++)
+        {
+            BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
+            if (srcObj)
+                sum += srcObj->GetDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
+        }
+    }
+
+    // Target material (so shader refreshes when the material is edited)
+    BaseMaterial* mat = static_cast<BaseMaterial*>(data->GetLink(TARGET_MATERIAL, doc, Mmaterial));
+    if (mat)
+        sum += mat->GetDirty(DIRTYFLAGS::DATA);
+
+    // Camera in camera mode (explicit link OR editor camera)
+    if (data->GetInt32(PROJ_MODE, PROJ_MODE_FLAT_Z) == PROJ_MODE_CAMERA)
+    {
+        BaseObject* cam = static_cast<BaseObject*>(data->GetLink(PROJ_CAMERA_LINK, doc, Ocamera));
+        if (!cam)
+        {
+            BaseDraw* bd = doc->GetActiveBaseDraw();
+            if (bd)
+            {
+                cam = bd->GetSceneCamera(doc);
+                if (!cam) cam = bd->GetEditorCamera();
+            }
+        }
+        if (cam)
+            sum += cam->GetDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA);
+    }
+
+    if (sum != m_lastDependencyDirty)
+    {
+        m_lastDependencyDirty = sum;
+        op->SetDirty(DIRTYFLAGS::DATA);
+    }
+}
+
 // ==================== GetVirtualObjects ====================
 
 BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, HierarchyHelp* hh)
@@ -302,7 +360,11 @@ void GeometryProjectorObject::UpdateMaterial(BaseObject* op, BaseDocument* doc)
 
     mat->Message(MSG_UPDATE);
     mat->Update(true, true);
-    EventAdd();
+    // FORCEREDRAW makes C4D immediately re-evaluate the material + its shaders
+    // (including InitRender on the ProjectionShader, which snapshots the new
+    // bitmap). Without it the viewport only refreshes on the next frame tick,
+    // which is why the user saw updates only while playing the timeline.
+    EventAdd(EVENT::FORCEREDRAW);
 }
 
 void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)

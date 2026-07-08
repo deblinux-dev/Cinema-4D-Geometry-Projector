@@ -29,6 +29,12 @@ public:
 
     BaseObject* GetVirtualObjects(BaseObject* op, HierarchyHelp* hh) override;
 
+    // Forces C4D to re-evaluate this generator when InExclude source objects
+    // (or the camera in camera mode) change. Without this, C4D does not know
+    // the generator depends on those external objects and never calls
+    // GetVirtualObjects() when they move.
+    void CheckDirty(BaseObject* op, BaseDocument* doc) override;
+
     Bool Message(GeListNode* node, Int32 type, void* data) override;
 
     Bool GetDEnabling(GeListNode* node, const DescID& id, const GeData& t_data,
@@ -42,6 +48,11 @@ public:
 
 private:
     Int64 m_cacheId = 0;
+
+    // Last combined dirty checksum of source objects + camera. CheckDirty()
+    // compares the current checksum against this and calls op->SetDirty() when
+    // it changes, so C4D re-runs GetVirtualObjects() and the bitmap is rebuilt.
+    UInt32 m_lastDependencyDirty = 0;
 
     void DoUpdate(BaseObject* op, BaseDocument* doc);
 
