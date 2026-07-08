@@ -49,11 +49,6 @@ public:
 private:
     Int64 m_cacheId = 0;
 
-    // Last combined dirty checksum of source objects + camera. CheckDirty()
-    // compares the current checksum against this and calls op->SetDirty() when
-    // it changes, so C4D re-runs GetVirtualObjects() and the bitmap is rebuilt.
-    UInt32 m_lastDependencyDirty = 0;
-
     void DoUpdate(BaseObject* op, BaseDocument* doc);
 
     std::vector<BaseObject*> GetSourceObjects(BaseObject* op, BaseDocument* doc);

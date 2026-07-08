@@ -170,9 +170,13 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
     BaseContainer* data = op->GetDataInstance();
     if (!data || !doc) return;
 
+    // Sum the dirty counters of all dependencies. Use SEPARATE GetDirty() calls
+    // per flag (not a combined OR mask) because the combined-mask return value
+    // can collide between different objects/changes, which caused only the first
+    // source object's edits to be detected. GetDirty() returns a counter that
+    // only increases, so summing per-flag per-object gives a unique checksum.
     UInt32 sum = 0;
 
-    // Source objects (geometry to project)
     InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
     if (srcList)
     {
@@ -181,22 +185,26 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
         {
             BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
             if (srcObj)
-                sum += srcObj->GetDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
+            {
+                sum += srcObj->GetDirty(DIRTYFLAGS::MATRIX);
+                sum += srcObj->GetDirty(DIRTYFLAGS::DATA);
+                sum += srcObj->GetDirty(DIRTYFLAGS::CACHE);
+            }
         }
     }
 
-    // Target material (so shader refreshes when the material is edited)
     BaseMaterial* mat = static_cast<BaseMaterial*>(data->GetLink(TARGET_MATERIAL, doc, Mmaterial));
     if (mat)
         sum += mat->GetDirty(DIRTYFLAGS::DATA);
 
-    // Target object (the surface geometry is projected onto; its bounds drive
-    // the UV layout, so any transform change must trigger a re-projection)
     BaseObject* tgtObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
     if (tgtObj)
-        sum += tgtObj->GetDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
+    {
+        sum += tgtObj->GetDirty(DIRTYFLAGS::MATRIX);
+        sum += tgtObj->GetDirty(DIRTYFLAGS::DATA);
+        sum += tgtObj->GetDirty(DIRTYFLAGS::CACHE);
+    }
 
-    // Camera in camera mode (explicit link OR editor camera)
     if (data->GetInt32(PROJ_MODE, PROJ_MODE_FLAT_Z) == PROJ_MODE_CAMERA)
     {
         BaseObject* cam = static_cast<BaseObject*>(data->GetLink(PROJ_CAMERA_LINK, doc, Ocamera));
@@ -210,12 +218,19 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
             }
         }
         if (cam)
-            sum += cam->GetDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA);
+        {
+            sum += cam->GetDirty(DIRTYFLAGS::MATRIX);
+            sum += cam->GetDirty(DIRTYFLAGS::DATA);
+        }
     }
 
-    if (sum != m_lastDependencyDirty)
+    // Read the last checksum from the container (survives viewport cloning,
+    // unlike a class field which starts at 0 on a fresh clone and would miss
+    // the first change after cloning).
+    UInt32 last = (UInt32)data->GetInt32(PARAM_DIRTY_SUM, 0);
+    if (sum != last)
     {
-        m_lastDependencyDirty = sum;
+        data->SetInt32(PARAM_DIRTY_SUM, (Int32)sum);
         op->SetDirty(DIRTYFLAGS::DATA);
     }
 }
@@ -227,25 +242,14 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
     BaseDocument* doc = op->GetDocument();
     if (!doc) return BaseObject::Alloc(Onull);
 
-    BaseContainer* data = op->GetDataInstance();
-    if (!data) return BaseObject::Alloc(Onull);
-
+    // CheckDirty() tracks all external dependencies (source objects, target
+    // object, camera) and calls op->SetDirty(DATA) when any of them change.
+    // Here we just check if this object is dirty -- if so, rebuild the cache.
+    // (We deliberately do NOT call IsDirty() on the source objects here, as
+    // that resets their dirty flags and can interfere with CheckDirty's
+    // GetDirty()-based checksum tracking, which previously caused only the
+    // first source object's edits to be detected.)
     Bool dirty = op->IsDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::MATRIX | DIRTYFLAGS::CACHE);
-
-    if (!dirty)
-    {
-        InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
-        if (srcList)
-        {
-            Int32 cnt = srcList->GetObjectCount();
-            for (Int32 i = 0; i < cnt && !dirty; i++)
-            {
-                BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
-                if (srcObj && srcObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
-                    dirty = true;
-            }
-        }
-    }
 
     ProjectionCache* cache = GetCache(op);
 

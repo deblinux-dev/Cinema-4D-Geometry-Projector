@@ -47,7 +47,9 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
         }
     }
 
-    // Try the best cache first
+    // Try the best cache first. For parametric primitives (Cube, Circle, etc.)
+    // GetCache() returns the generated polygon/spline object. For editable
+    // objects the cache may be null and we collect the object directly.
     BaseObject* cache = GetBestCache(obj);
     if (cache)
     {
@@ -55,12 +57,35 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     }
     else
     {
-        // No cache. If the object itself is a spline or polygon object, collect
-        // it directly.  Otherwise (e.g. parametric primitive whose cache hasn't
-        // been built yet) there is nothing we can extract.
-        Int32 type = obj->GetType();
-        if (type == Opolygon || type == Ospline)
+        // No cache. Is this a spline (editable OR parametric like Circle)?
+        // Use IsInstanceOf(Ospline) -- parametric splines (OCIRCLE, ORECTANGLE)
+        // have their own GetType() but all inherit from Ospline, so a plain
+        // 'type == Ospline' check misses them and they were silently skipped.
+        if (obj->IsInstanceOf(Ospline))
+        {
+            SplineObject* splineObj = static_cast<SplineObject*>(obj);
+
+            // For parametric splines the real points live in a generated
+            // 'real spline'. GetRealSpline() returns it (building the cache
+            // on demand if needed). For editable splines it typically returns
+            // the object itself.
+            SplineObject* realSpline = splineObj->GetRealSpline();
+            if (realSpline && realSpline->GetPointCount() >= 2)
+            {
+                CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
+            }
+            else if (splineObj->GetPointCount() >= 2)
+            {
+                // Editable spline with points stored directly on the object.
+                CollectSpline(splineObj, obj->GetMg(), splineSubdiv);
+            }
+            // else: parametric spline whose cache could not be built yet --
+            // nothing to collect this frame; the next dirty tick will retry.
+        }
+        else if (obj->IsInstanceOf(Opolygon))
+        {
             CollectFromCache(obj, obj->GetMg(), doc, splineSubdiv);
+        }
     }
 }
 
@@ -98,11 +123,13 @@ void GeometryCollector::CollectFromCache(BaseObject* cacheObj, const Matrix& wor
 
     Int32 type = cacheObj->GetType();
 
+    // Use IsInstanceOf for spline detection so parametric spline caches
+    // (which may report OCIRCLE/ORECTANGLE from GetType) are still collected.
     if (type == Opolygon)
     {
         CollectPolygonObject(static_cast<PolygonObject*>(cacheObj), worldMg);
     }
-    else if (type == Ospline)
+    else if (cacheObj->IsInstanceOf(Ospline))
     {
         CollectSpline(static_cast<SplineObject*>(cacheObj), worldMg, splineSubdiv);
     }
