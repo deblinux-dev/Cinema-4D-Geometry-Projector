@@ -189,9 +189,9 @@ inline ObjectDirtyState GetObjectDirtyState(BaseObject* obj)
     ObjectDirtyState s;
     if (obj)
     {
-        s.matrixDirty = obj->GetDirty(DIRTYFLAGS_MATRIX);
-        s.dataDirty   = obj->GetDirty(DIRTYFLAGS_DATA);
-        s.cacheDirty  = obj->GetDirty(DIRTYFLAGS_CACHE);
+        s.matrixDirty = obj->GetDirty(DIRTYFLAGS::MATRIX);
+        s.dataDirty   = obj->GetDirty(DIRTYFLAGS::DATA);
+        s.cacheDirty  = obj->GetDirty(DIRTYFLAGS::CACHE);
     }
     return s;
 }

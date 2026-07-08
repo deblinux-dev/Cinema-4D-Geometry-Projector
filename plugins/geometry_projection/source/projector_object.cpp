@@ -149,7 +149,7 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
     BaseContainer* data = op->GetDataInstance();
     if (!data) return BaseObject::Alloc(Onull);
 
-    Bool dirty = op->IsDirty(DIRTYFLAGS_DATA | DIRTYFLAGS_MATRIX | DIRTYFLAGS_CACHE);
+    Bool dirty = op->IsDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::MATRIX | DIRTYFLAGS::CACHE);
 
     if (!dirty)
     {
@@ -161,7 +161,7 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
             for (Int32 i = 0; i < cnt && !dirty; i++)
             {
                 BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
-                if (srcObj && srcObj->IsDirty(DIRTYFLAGS_MATRIX | DIRTYFLAGS_DATA | DIRTYFLAGS_CACHE))
+                if (srcObj && srcObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
                     dirty = true;
             }
         }
@@ -340,8 +340,8 @@ void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)
     doc->StartUndo();
 
     mat->InsertShader(shader);
-    doc->AddUndo(UNDOTYPE_NEW, shader);
-    doc->AddUndo(UNDOTYPE_CHANGE, mat);
+    doc->AddUndo(UNDOTYPE::NEW, shader);
+    doc->AddUndo(UNDOTYPE::CHANGE, mat);
 
     BaseContainer* matData = mat->GetDataInstance();
     if (matData)
@@ -437,11 +437,11 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
         case FORMAT_PSD:  saveFormat = FILTER_PSD; break;
     }
 
-    IMAGERESULT ir = finalBitmap->Save(bakePath, saveFormat, nullptr, SAVEBIT_NONE);
+    IMAGERESULT ir = finalBitmap->Save(bakePath, saveFormat, nullptr, SAVEBIT::NONE);
     BaseBitmap::Free(finalBitmap);
 
     if (ir == IMAGERESULT::OK)
-        MessageDialog("Texture saved: "_s + bakePath.GetString());
+        MessageDialog(String("Texture saved: ") + bakePath.GetString());
     else
         MessageDialog("File save failed."_s);
 }
@@ -466,7 +466,7 @@ Bool GeometryProjectorObject::Message(GeListNode* node, Int32 type, void* data)
             {
                 ProjectionCache* cache = GetCache(op);
                 if (cache) cache->InvalidateAll();
-                op->SetDirty(DIRTYFLAGS_DATA);
+                op->SetDirty(DIRTYFLAGS::DATA);
                 EventAdd();
                 return true;
             }
