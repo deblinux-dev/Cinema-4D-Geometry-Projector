@@ -1,8 +1,9 @@
-// GeometryProjectorObject implementation
-
 #include "projector_object.h"
 #include "description/Ogeometryprojector.h"
 #include "description/Xprojectionshader.h"
+#include "customgui_inexclude.h"
+#include "c4d_basedocument.h"
+#include "projection_shader.h"
 
 // ---- Material channel ID lookup ----
 
@@ -166,7 +167,7 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
         }
     }
 
-    ProjectionCache* cache = GetCache();
+    ProjectionCache* cache = GetCache(op);
 
     if (dirty || !cache || !cache->rasterValid)
         DoUpdate(op, doc);
@@ -191,7 +192,7 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
     BaseObject* targetObj = srcObjs[0];
     ProjectionSettings settings = ProjectionSettings::FromContainer(data, previewRes, targetObj, doc);
 
-    ProjectionCache* cache = GetCache();
+    ProjectionCache* cache = GetCache(op);
     if (!cache) return;
 
     std::map<Int64, ObjectDirtyState> currentStates;
@@ -280,12 +281,12 @@ Int32 GeometryProjectorObject::GetResolutionFromParam(Int32 paramValue)
     }
 }
 
-ProjectionCache* GeometryProjectorObject::GetCache()
+ProjectionCache* GeometryProjectorObject::GetCache(BaseObject* op)
 {
     if (m_cacheId == 0)
     {
         m_cacheId = GenerateUniqueCacheID();
-        BaseContainer* data = GetDataInstance();
+        BaseContainer* data = op->GetDataInstance(); // Теперь берем из op!
         if (data)
             data->SetInt64(PARAM_CACHE_ID, m_cacheId);
     }
@@ -410,20 +411,13 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
         BaseBitmap* scaledBm = BaseBitmap::Alloc();
         if (scaledBm && scaledBm->Init(bakeW, bakeH, 24) == IMAGERESULT::OK)
         {
-            IMAGERESULT scaleResult = bitmap->ScaleBicubic(
+            bitmap->ScaleBicubic(
                 scaledBm,
                 0, 0, renderW - 1, renderH - 1,
                 0, 0, bakeW  - 1, bakeH  - 1);
 
             BaseBitmap::Free(bitmap);
-            if (scaleResult == IMAGERESULT::OK)
-                finalBitmap = scaledBm;
-            else
-            {
-                BaseBitmap::Free(scaledBm);
-                MessageDialog("Downscale failed."_s);
-                return;
-            }
+            finalBitmap = scaledBm;
         }
         else
         {
@@ -470,7 +464,7 @@ Bool GeometryProjectorObject::Message(GeListNode* node, Int32 type, void* data)
             else if (descId == BTN_BAKE)           { BakeToFile(op, doc);   return true; }
             else if (descId == BTN_REFRESH)
             {
-                ProjectionCache* cache = GetCache();
+                ProjectionCache* cache = GetCache(op);
                 if (cache) cache->InvalidateAll();
                 op->SetDirty(DIRTYFLAGS_DATA);
                 EventAdd();
@@ -528,7 +522,7 @@ DRAWRESULT GeometryProjectorObject::Draw(BaseObject* op, DRAWPASS drawpass,
 
 void GeometryProjectorObject::DrawBounds(BaseObject* op, BaseDraw* bd, BaseDrawHelp* bh)
 {
-    ProjectionCache* cache = GetCache();
+    ProjectionCache* cache = GetCache(op);
     if (!cache || !cache->geometryValid) return;
 
     const CollectedGeometry& geom = cache->geometry;

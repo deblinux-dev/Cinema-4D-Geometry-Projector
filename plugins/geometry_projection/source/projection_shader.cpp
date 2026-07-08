@@ -1,5 +1,3 @@
-// ProjectionShader implementation
-
 #include "projection_shader.h"
 #include "projector_object.h"
 #include "description/Xprojectionshader.h"
@@ -72,7 +70,7 @@ INITRENDERRESULT ProjectionShader::InitRender(BaseShader* sh, const InitRenderSt
     std::vector<uint8_t> rowBuf(bw * 3);
     for (Int32 y = 0; y < bh; y++)
     {
-        cache->bitmap->GetPixelCnt(0, y, bw, rowBuf.data(), COLORMODE::RGB, PIXELCNT::NONE);
+        cache->bitmap->GetPixelCnt(0, y, bw, rowBuf.data(), 3, COLORMODE::RGB, PIXELCNT::NONE);
         uint8_t* dst = m_pixelData.data() + y * bw * 3;
         for (Int32 x = 0; x < bw; x++)
         {

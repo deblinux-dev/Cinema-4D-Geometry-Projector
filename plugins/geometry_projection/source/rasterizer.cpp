@@ -361,7 +361,7 @@ BaseBitmap* Rasterizer::Flush()
             rowBuf[x * 3 + 1] = m_rgb[(base + x) * 3 + 1];
             rowBuf[x * 3 + 2] = m_rgb[(base + x) * 3 + 2];
         }
-        bm->SetPixelCnt(0, y, m_width, rowBuf.data(), COLORMODE::RGB, PIXELCNT::NONE);
+        bm->SetPixelCnt(0, y, m_width, rowBuf.data(), 3, COLORMODE::RGB, PIXELCNT::NONE);
     }
 
     // Write alpha channel if requested
@@ -377,8 +377,8 @@ BaseBitmap* Rasterizer::Flush()
                 Int32 base = y * m_width;
                 for (Int32 x = 0; x < m_width; x++)
                     alphaRow[x] = m_alpha[base + x];
-                alphaBm->SetPixelCnt(0, y, m_width, alphaRow.data(),
-                                      COLORMODE::GRAY, PIXELCNT::NONE);
+                alphaBm->SetPixelCnt(0, y, m_width, alphaRow.data(), 1, COLORMODE::GRAY, PIXELCNT::NONE);
+
             }
         }
     }

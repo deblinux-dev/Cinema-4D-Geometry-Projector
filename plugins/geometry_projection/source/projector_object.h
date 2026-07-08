@@ -52,7 +52,7 @@ private:
     void CreateShader(BaseObject* op, BaseDocument* doc);
     void BakeToFile(BaseObject* op, BaseDocument* doc);
 
-    ProjectionCache* GetCache();
+    ProjectionCache* GetCache(BaseObject* op);
 
     void DrawBounds(BaseObject* op, BaseDraw* bd, BaseDrawHelp* bh);
 };
