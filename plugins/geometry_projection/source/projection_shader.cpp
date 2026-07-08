@@ -105,7 +105,11 @@ Vector ProjectionShader::Output(BaseShader* sh, ChannelData* cd)
     if (m_blendMode == BLEND_REPLACE)
         return sample;
 
-    return ApplyBlend(cd->t, sample);
+    // Note: a true base surface color is not available in Output() (the shader
+    // output IS the channel color; blending with the material base is handled
+    // by C4D's material system). Non-replace modes therefore return the sample
+    // directly for now; the blend enum is kept for future VolumeData-based use.
+    return sample;
 }
 
 // ==================== SamplePixelData ====================

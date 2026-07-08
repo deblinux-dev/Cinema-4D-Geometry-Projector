@@ -208,14 +208,14 @@ std::pair<Float,Float> GeometryProjector::ProjectCustom(const Vector& pt,
     else             dir = dir / len;
 
     Vector up(0, 1, 0);
-    if (Abs(dir % up) > 0.999) up = Vector(1, 0, 0);
+    if (Abs(Dot(dir, up)) > 0.999) up = Vector(1, 0, 0);
 
-    Vector right = dir % up;
+    Vector right = Cross(dir, up);
     right.Normalize();
-    up = right % dir;
+    up = Cross(right, dir);
     up.Normalize();
 
-    return { pt * right, pt * up };
+    return { Dot(pt, right), Dot(pt, up) };
 }
 
 void GeometryProjector::GetTargetUVBounds(const ProjectionSettings& settings,

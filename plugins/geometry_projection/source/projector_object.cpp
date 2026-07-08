@@ -131,7 +131,7 @@ Bool GeometryProjectorObject::CopyTo(NodeData* dest, GeListNode* snode, GeListNo
             destObj->m_cacheId = GenerateUniqueCacheID();
         }
 
-        BaseContainer* destData = dnode->GetDataInstance();
+        BaseContainer* destData = static_cast<BaseObject*>(dnode)->GetDataInstance();
         if (destData)
         {
             destData->SetInt64(PARAM_CACHE_ID, destObj->m_cacheId);
@@ -339,8 +339,8 @@ void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)
     mat->InsertShader(shader);
     
     // ИСПРАВЛЕНИЕ: Точное имя константы Undo для Cinema 4D
-    doc->AddUndo(UNDOTYPE_NEWOBJ, shader);
-    doc->AddUndo(UNDOTYPE_CHANGE, mat);
+    doc->AddUndo(UNDOTYPE::NEWOBJ, shader);
+    doc->AddUndo(UNDOTYPE::CHANGE, mat);
 
     BaseContainer* matData = mat->GetDataInstance();
     if (matData)

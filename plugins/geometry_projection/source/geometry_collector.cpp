@@ -192,8 +192,8 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
     if (!hasSegments)
         segCount = 1;
 
-    Int32 splineType       = workSpline->GetSplineType();
-    bool  needsInterpolation = (splineType != SPLINETYPE_LINEAR);
+    SPLINETYPE splineType       = workSpline->GetInterpolationType();
+    bool  needsInterpolation = (splineType != SPLINETYPE::LINEAR);
 
     Int32 startPt = 0;
 
