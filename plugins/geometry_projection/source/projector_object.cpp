@@ -1,6 +1,9 @@
 #include "projector_object.h"
-#include "description/Ogeometryprojector.h"
-#include "description/Xprojectionshader.h"
+
+// КУВАЛДА: Форсируем чтение именно ваших новых файлов по прямому относительному пути!
+#include "../res/description/Ogeometryprojector.h"
+#include "../res/description/Xprojectionshader.h"
+
 #include "customgui_inexclude.h"
 #include "c4d_basedocument.h"
 #include "projection_shader.h"
@@ -335,9 +338,9 @@ void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)
 
     mat->InsertShader(shader);
     
-    // ИСПРАВЛЕНИЕ: Точный синтаксис R21 для Undo (через ::)
-    doc->AddUndo(UNDOTYPE::NEW, shader);
-    doc->AddUndo(UNDOTYPE::CHANGE, mat);
+    // ИСПРАВЛЕНИЕ: Точное имя константы Undo для Cinema 4D
+    doc->AddUndo(UNDOTYPE_NEWOBJ, shader);
+    doc->AddUndo(UNDOTYPE_CHANGE, mat);
 
     BaseContainer* matData = mat->GetDataInstance();
     if (matData)
