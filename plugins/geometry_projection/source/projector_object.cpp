@@ -224,13 +224,12 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
         }
     }
 
-    // Read the last checksum from the container (survives viewport cloning,
-    // unlike a class field which starts at 0 on a fresh clone and would miss
-    // the first change after cloning).
-    UInt32 last = (UInt32)data->GetInt32(PARAM_DIRTY_SUM, 0);
-    if (sum != last)
+    // Compare against the class field. On viewport clones this field resets
+    // to 0, so the first CheckDirty always sees a difference and forces a
+    // rebuild -- this is what drives the real-time viewport update.
+    if (sum != m_lastDependencyDirty)
     {
-        data->SetInt32(PARAM_DIRTY_SUM, (Int32)sum);
+        m_lastDependencyDirty = sum;
         op->SetDirty(DIRTYFLAGS::DATA);
     }
 }

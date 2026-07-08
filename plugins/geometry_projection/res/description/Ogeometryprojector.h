@@ -84,13 +84,7 @@ enum
 
     BTN_CREATE_SHADER       = 1501,
     BTN_BAKE                = 1502,
-    BTN_REFRESH             = 1503,
-
-    // Hidden parameter: stores the last combined dirty checksum of all source
-    // objects + target + camera. CheckDirty compares the current checksum
-    // against this value to detect external changes. Stored in the container
-    // (not a class field) so it survives viewport cloning.
-    PARAM_DIRTY_SUM         = 99998
+    BTN_REFRESH             = 1503
 };
 
 #endif

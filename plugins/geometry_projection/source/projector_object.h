@@ -49,6 +49,13 @@ public:
 private:
     Int64 m_cacheId = 0;
 
+    // Last combined dirty checksum of source objects + target + camera.
+    // This is a CLASS FIELD (intentionally reset to 0 on viewport cloning):
+    // the first CheckDirty on a fresh clone always sees sum != 0 and triggers
+    // a rebuild, which is what makes the viewport update. Storing it in the
+    // container (previous attempt) survived cloning and broke real-time.
+    UInt32 m_lastDependencyDirty = 0;
+
     void DoUpdate(BaseObject* op, BaseDocument* doc);
 
     std::vector<BaseObject*> GetSourceObjects(BaseObject* op, BaseDocument* doc);

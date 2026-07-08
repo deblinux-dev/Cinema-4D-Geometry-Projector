@@ -60,6 +60,79 @@ static bool CS_ClipLine(Float& u0, Float& v0, Float& u1, Float& v1)
     }
 }
 
+// ==================== UV polygon clipping (Sutherland-Hodgman) ====================
+// Clips a polygon to the [0..1] UV box. Without this, a polygon entirely
+// outside the target bounds (e.g. a cube moved past the plane edge) still
+// produced a 1-pixel strip at the bitmap border, because ScanlineFill's HLine
+// clamped negative x coordinates to 0 and drew a single pixel there.
+
+using UVPoint = std::pair<Float, Float>;
+
+static void SH_ClipAgainstEdge(std::vector<UVPoint>& poly, Float u, Float v,
+                                int edge, Float bound)
+{
+    std::vector<UVPoint> out;
+    if (poly.empty()) return;
+    Int32 n = (Int32)poly.size();
+    for (Int32 i = 0; i < n; i++)
+    {
+        UVPoint cur  = poly[i];
+        UVPoint prev = poly[(i - 1 + n) % n];
+
+        // 'inside' test depends on which edge we clip against
+        auto isInside = [&](const UVPoint& p) -> bool {
+            switch (edge)
+            {
+                case 0: return p.first  >= bound; // left (u >= 0)
+                case 1: return p.first  <= bound; // right (u <= 1)
+                case 2: return p.second >= bound; // bottom (v >= 0)
+                case 3: return p.second <= bound; // top (v <= 1)
+            }
+            return true;
+        };
+
+        bool curIn  = isInside(cur);
+        bool prevIn = isInside(prev);
+
+        if (curIn)
+        {
+            if (!prevIn)
+            {
+                // Entering: compute intersection
+                Float du = cur.first - prev.first;
+                Float dv = cur.second - prev.second;
+                Float t;
+                if (edge <= 1) t = (bound - prev.first)  / (du != 0.0 ? du : 1e-10);
+                else           t = (bound - prev.second) / (dv != 0.0 ? dv : 1e-10);
+                out.push_back({ prev.first  + t * du, prev.second + t * dv });
+            }
+            out.push_back(cur);
+        }
+        else if (prevIn)
+        {
+            // Leaving: compute intersection
+            Float du = cur.first - prev.first;
+            Float dv = cur.second - prev.second;
+            Float t;
+            if (edge <= 1) t = (bound - prev.first)  / (du != 0.0 ? du : 1e-10);
+            else           t = (bound - prev.second) / (dv != 0.0 ? dv : 1e-10);
+            out.push_back({ prev.first  + t * du, prev.second + t * dv });
+        }
+    }
+    poly = std::move(out);
+}
+
+// Clip a UV polygon to [0..1] x [0..1]. Returns the clipped polygon (may be
+// empty if the input was entirely outside).
+static std::vector<UVPoint> SH_ClipPolygon(std::vector<UVPoint> poly)
+{
+    SH_ClipAgainstEdge(poly, 0, 0, 0, 0.0); // left:   u >= 0
+    SH_ClipAgainstEdge(poly, 0, 0, 1, 1.0); // right:  u <= 1
+    SH_ClipAgainstEdge(poly, 0, 0, 2, 0.0); // bottom: v >= 0
+    SH_ClipAgainstEdge(poly, 0, 0, 3, 1.0); // top:    v <= 1
+    return poly;
+}
+
 // ==================== Entry point ====================
 
 BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
@@ -105,35 +178,53 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         );
     };
 
-    // 1. Fill polygons (per-object color)
+    // 1. Fill polygons (per-object color), UV-clipped to [0..1]
     if (settings.drawFill)
     {
         for (const auto& poly : projected.polygons)
         {
             if ((Int32)poly.indices.size() < 3) continue;
             auto [r, g, b] = to255(poly.color);
-            std::vector<std::pair<Int32,Int32>> corners;
-            corners.reserve(poly.indices.size());
+
+            // Build UV polygon and clip to [0..1] so fills outside the target
+            // bounds don't leave a 1-pixel strip at the bitmap edge.
+            std::vector<UVPoint> uvPoly;
+            uvPoly.reserve(poly.indices.size());
             for (Int32 idx : poly.indices)
             {
                 if (idx >= 0 && idx < ptCount)
-                    corners.push_back(pixelPts[idx]);
+                    uvPoly.push_back(projected.points2d[idx]);
             }
+            uvPoly = SH_ClipPolygon(std::move(uvPoly));
+            if (uvPoly.size() < 3) continue;
+
+            std::vector<std::pair<Int32,Int32>> corners;
+            corners.reserve(uvPoly.size());
+            for (const auto& uv : uvPoly)
+                corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
             ScanlineFill(corners, r, g, b, alpha);
         }
 
-        // Fill closed splines (per-object color)
+        // Fill closed splines (per-object color), UV-clipped
         for (const auto& sp : projected.closedSplines)
         {
             if ((Int32)sp.indices.size() < 3) continue;
             auto [r, g, b] = to255(sp.color);
-            std::vector<std::pair<Int32,Int32>> corners;
-            corners.reserve(sp.indices.size());
+
+            std::vector<UVPoint> uvPoly;
+            uvPoly.reserve(sp.indices.size());
             for (Int32 idx : sp.indices)
             {
                 if (idx >= 0 && idx < ptCount)
-                    corners.push_back(pixelPts[idx]);
+                    uvPoly.push_back(projected.points2d[idx]);
             }
+            uvPoly = SH_ClipPolygon(std::move(uvPoly));
+            if (uvPoly.size() < 3) continue;
+
+            std::vector<std::pair<Int32,Int32>> corners;
+            corners.reserve(uvPoly.size());
+            for (const auto& uv : uvPoly)
+                corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
             ScanlineFill(corners, r, g, b, alpha);
         }
     }
