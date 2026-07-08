@@ -41,10 +41,7 @@ jobs:
             Write-Host "Processing $fw..."
             & $pyExe $pyScript $path
         }
-        
-        # Также обработаем сам плагин
-        Write-Host "Processing plugin..."
-        & $pyExe $pyScript (Join-Path $RootDir "plugins\geometry_projection")
+      
 
     - name: Build Plugin
       shell: powershell

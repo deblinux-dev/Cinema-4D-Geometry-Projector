@@ -23,6 +23,9 @@ public:
 
     Bool Init(GeListNode* node) override;
     void Free(GeListNode* node) override;
+    
+    // ДОБАВЛЕНО: Объявление функции Read, на отсутствие которой ругался компилятор
+    Bool Read(GeListNode* node, HyperFile* hf, Int32 level) override;
 
     BaseObject* GetVirtualObjects(BaseObject* op, HierarchyHelp* hh) override;
 
@@ -31,7 +34,6 @@ public:
     Bool GetDEnabling(GeListNode* node, const DescID& id, const GeData& t_data,
                        DESCFLAGS_ENABLE flags, const BaseContainer* itemdesc) override;
 
-    // Change #2: draw bounding box via Draw() when Show Bounds is on
     DRAWRESULT Draw(BaseObject* op, DRAWPASS drawpass, BaseDraw* bd,
                      BaseDrawHelp* bh) override;
 
@@ -39,7 +41,6 @@ public:
                  COPYFLAGS flags, AliasTrans* trn) override;
 
 private:
-    // Fix BUG 5: use Int64 to hold a full 64-bit pointer value without truncation
     Int64 m_cacheId = 0;
 
     void DoUpdate(BaseObject* op, BaseDocument* doc);

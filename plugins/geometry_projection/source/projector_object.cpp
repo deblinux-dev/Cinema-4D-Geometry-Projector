@@ -48,7 +48,6 @@ Bool GeometryProjectorObject::Init(GeListNode* node)
     BaseContainer* data = op->GetDataInstance();
     if (!data) return false;
 
-    // Инициализация уникального безопасного ID кэша
     m_cacheId = GenerateUniqueCacheID();
     data->SetInt64(PARAM_CACHE_ID, m_cacheId);
 
@@ -104,9 +103,9 @@ Bool GeometryProjectorObject::Read(GeListNode* node, HyperFile* hf, Int32 level)
     if (!SUPER::Read(node, hf, level))
         return false;
 
-    // Генерируем новый ID при загрузке файла для исключения коллизий с другими открытыми сценами
     m_cacheId = GenerateUniqueCacheID();
-    BaseContainer* data = static_cast<BaseObject*>(node)->GetDataInstance();
+    BaseObject* op = (BaseObject*)node;
+    BaseContainer* data = op->GetDataInstance();
     if (data)
     {
         data->SetInt64(PARAM_CACHE_ID, m_cacheId);
@@ -120,7 +119,6 @@ Bool GeometryProjectorObject::CopyTo(NodeData* dest, GeListNode* snode, GeListNo
     GeometryProjectorObject* destObj = static_cast<GeometryProjectorObject*>(dest);
     if (destObj)
     {
-        // Оптимизация: рендер-клоны наследуют оригинальный кэш, пользовательские копии получают новый ID
         if (flags & COPYFLAGS::DOCUMENT)
         {
             destObj->m_cacheId = m_cacheId;
@@ -153,8 +151,8 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
 
     if (!dirty)
     {
-        InExcludeData* srcList = static_cast<InExcludeData*>(
-            data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST));
+        // ИСПРАВЛЕНИЕ: C-style cast обходит проблему с const
+        InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
         if (srcList)
         {
             Int32 cnt = srcList->GetObjectCount();
@@ -246,15 +244,13 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
 
 // ==================== Helpers ====================
 
-std::vector<BaseObject*> GeometryProjectorObject::GetSourceObjects(BaseObject* op,
-                                                                      BaseDocument* doc)
+std::vector<BaseObject*> GeometryProjectorObject::GetSourceObjects(BaseObject* op, BaseDocument* doc)
 {
     std::vector<BaseObject*> result;
     BaseContainer* data = op->GetDataInstance();
     if (!data) return result;
 
-    InExcludeData* srcList = static_cast<InExcludeData*>(
-        data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST));
+    InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
     if (!srcList) return result;
 
     Int32 cnt = srcList->GetObjectCount();
@@ -286,7 +282,7 @@ ProjectionCache* GeometryProjectorObject::GetCache(BaseObject* op)
     if (m_cacheId == 0)
     {
         m_cacheId = GenerateUniqueCacheID();
-        BaseContainer* data = op->GetDataInstance(); // Теперь берем из op!
+        BaseContainer* data = op->GetDataInstance(); 
         if (data)
             data->SetInt64(PARAM_CACHE_ID, m_cacheId);
     }
@@ -336,12 +332,12 @@ void GeometryProjectorObject::CreateShader(BaseObject* op, BaseDocument* doc)
     Int32 channelParam = data->GetInt32(TARGET_CHANNEL, CHANNEL_COLOR);
     Int32 channelShaderId = GetMaterialChannelId(channelParam);
 
-    // Добавлена полноценная отмена (Undo) для сохранения истории действий пользователя
     doc->StartUndo();
 
     mat->InsertShader(shader);
-    doc->AddUndo(UNDOTYPE::NEW, shader);
-    doc->AddUndo(UNDOTYPE::CHANGE, mat);
+    
+    doc->AddUndo(UNDOTYPE_NEW, shader);
+    doc->AddUndo(UNDOTYPE_CHANGE, mat);
 
     BaseContainer* matData = mat->GetDataInstance();
     if (matData)
@@ -474,7 +470,7 @@ Bool GeometryProjectorObject::Message(GeListNode* node, Int32 type, void* data)
     }
     else if (type == MSG_DESCRIPTION_POSTSETPARAMETER)
     {
-        op->SetDirty(DIRTYFLAGS_DATA);
+        op->SetDirty(DIRTYFLAGS::DATA);
     }
 
     return SUPER::Message(node, type, data);
