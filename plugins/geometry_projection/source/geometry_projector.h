@@ -88,14 +88,14 @@ struct ProjectedGeometry
     // 2D points (u, v) in [0..1]
     std::vector<std::pair<Float,Float>> points2d;
 
-    // Lines: index pairs into points2d (copied from CollectedGeometry)
-    std::vector<std::pair<Int32,Int32>> lines;
+    // Lines with per-object color and thickness (copied from CollectedGeometry)
+    std::vector<CollectedLine> lines;
 
-    // Polygons (copied from CollectedGeometry)
-    std::vector<std::vector<Int32>> polygons;
+    // Polygons with per-object color (copied from CollectedGeometry)
+    std::vector<CollectedPolygon> polygons;
 
-    // Closed splines (copied from CollectedGeometry)
-    std::vector<std::vector<Int32>> closedSplines;
+    // Closed splines with per-object color (copied from CollectedGeometry)
+    std::vector<CollectedPolygon> closedSplines;
 
     // Raw 2D bounds before normalization
     Float boundsMinX, boundsMinY;

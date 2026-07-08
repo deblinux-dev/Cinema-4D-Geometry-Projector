@@ -8,6 +8,22 @@
 #include "c4d_basedocument.h"
 #include "projection_shader.h"
 
+// ---- Find the ProjectionShader inside a material (recursive) ----
+// Searches top-level shaders and their children so the shader is found even
+// if it's nested inside a Fusion/Layer shader.
+static BaseShader* FindProjectionShaderRecursive(BaseShader* shd)
+{
+    while (shd)
+    {
+        if (shd->IsInstanceOf(PLUGIN_ID_PROJECTION_SHADER))
+            return shd;
+        BaseShader* found = FindProjectionShaderRecursive(shd->GetDown());
+        if (found) return found;
+        shd = shd->GetNext();
+    }
+    return nullptr;
+}
+
 // ---- Material channel ID lookup ----
 
 static Int32 GetMaterialChannelId(Int32 channelParam)
@@ -280,7 +296,8 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
     if (level >= CacheUpdateLevel::GEOMETRY)
     {
         GeometryCollector collector;
-        collector.Collect(srcObjs, doc, settings.splineSubdivision);
+        collector.Collect(srcObjs, doc, settings.splineSubdivision,
+                      settings.fgColor, settings.lineWidth);
         cache->geometry           = collector.GetGeometry();
         cache->objectDirtyStates  = currentStates;
         cache->geometryValid      = true;
@@ -368,12 +385,24 @@ void GeometryProjectorObject::UpdateMaterial(BaseObject* op, BaseDocument* doc)
         data->GetLink(TARGET_MATERIAL, doc, Mmaterial));
     if (!mat) return;
 
+    // The viewport caches a GL texture for each shader.  When the projector's
+    // bitmap changes, the cache is stale — but C4D does not know this because
+    // the dependency is a custom link, not a parent-child relationship.  We
+    // must explicitly invalidate the GL image so C4D regenerates it (calling
+    // InitGLImage or falling back to Output()) on the next redraw.
+    BaseShader* projShd = FindProjectionShaderRecursive(mat->GetFirstShader());
+    if (projShd)
+    {
+        projShd->InvalidateGLImage(doc);
+        projShd->SetDirty(DIRTYFLAGS::DATA);
+        projShd->Message(MSG_UPDATE);
+    }
+
+    // Also mark the material dirty + send update so C4D re-evaluates the
+    // full material pipeline for the viewport.
+    mat->SetDirty(DIRTYFLAGS::DATA);
     mat->Message(MSG_UPDATE);
     mat->Update(true, true);
-    // FORCEREDRAW makes C4D immediately re-evaluate the material + its shaders
-    // (including InitRender on the ProjectionShader, which snapshots the new
-    // bitmap). Without it the viewport only refreshes on the next frame tick,
-    // which is why the user saw updates only while playing the timeline.
     EventAdd(EVENT::FORCEREDRAW);
 }
 
@@ -462,7 +491,8 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
     settings.previewResolution = renderW;
 
     GeometryCollector collector;
-    collector.Collect(srcObjs, doc, settings.splineSubdivision);
+    collector.Collect(srcObjs, doc, settings.splineSubdivision,
+                      settings.fgColor, settings.lineWidth);
 
     GeometryProjector projector;
     ProjectedGeometry projected;

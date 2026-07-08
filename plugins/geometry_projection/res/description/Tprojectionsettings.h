@@ -1,0 +1,12 @@
+#ifndef TPROJECTIONSETTINGS_H__
+#define TPROJECTIONSETTINGS_H__
+
+enum
+{
+    PROJTAG_OVERRIDE_THICKNESS = 3001,
+    PROJTAG_THICKNESS          = 3002,
+    PROJTAG_OVERRIDE_COLOR     = 3003,
+    PROJTAG_COLOR              = 3004
+};
+
+#endif

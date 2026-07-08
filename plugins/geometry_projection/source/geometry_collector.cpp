@@ -1,13 +1,19 @@
 // Geometry collector implementation for Geometry Projector
 
 #include "geometry_collector.h"
+#include "projection_tag.h"
+#include "description/Tprojectionsettings.h"
 #include <cmath>
 
 void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
                                  BaseDocument* doc,
-                                 Int32 splineSubdiv)
+                                 Int32 splineSubdiv,
+                                 Vector defaultColor,
+                                 Float defaultThickness)
 {
     m_geometry.Clear();
+    m_defaultColor     = defaultColor;
+    m_defaultThickness = defaultThickness;
 
     for (BaseObject* obj : objects)
     {
@@ -22,8 +28,24 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     if (!obj)
         return;
 
-    // Change #6: do NOT skip hidden (MODE_OFF) objects.
-    // Visibility is controlled by per-entry checkboxes in InExcludeData, not editor mode.
+    // Resolve per-object color and thickness from the ProjectionSettingsTag.
+    // If the tag is not present, or the override flags are off, fall back to
+    // the global defaults passed from ProjectionSettings.
+    m_currentColor     = m_defaultColor;
+    m_currentThickness = m_defaultThickness;
+
+    BaseTag* tag = obj->GetTag(PLUGIN_ID_PROJECTION_TAG);
+    if (tag)
+    {
+        BaseContainer* td = tag->GetDataInstance();
+        if (td)
+        {
+            if (td->GetBool(PROJTAG_OVERRIDE_COLOR))
+                m_currentColor = td->GetVector(PROJTAG_COLOR, m_defaultColor);
+            if (td->GetBool(PROJTAG_OVERRIDE_THICKNESS))
+                m_currentThickness = td->GetFloat(PROJTAG_THICKNESS, m_defaultThickness);
+        }
+    }
 
     // Try the best cache first
     BaseObject* cache = GetBestCache(obj);
@@ -33,8 +55,12 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     }
     else
     {
-        // No cache -- treat the object itself as the source
-        CollectFromCache(obj, obj->GetMg(), doc, splineSubdiv);
+        // No cache. If the object itself is a spline or polygon object, collect
+        // it directly.  Otherwise (e.g. parametric primitive whose cache hasn't
+        // been built yet) there is nothing we can extract.
+        Int32 type = obj->GetType();
+        if (type == Opolygon || type == Ospline)
+            CollectFromCache(obj, obj->GetMg(), doc, splineSubdiv);
     }
 }
 
@@ -62,12 +88,10 @@ void GeometryCollector::CollectFromCache(BaseObject* cacheObj, const Matrix& wor
     if (!cacheObj)
         return;
 
-    // Fix for BUG 12: check for deform cache BEFORE dispatching by type,
-    // so we never collect the raw object AND its deform cache both.
+    // Check for deform cache BEFORE dispatching by type
     BaseObject* deformCache = cacheObj->GetDeformCache();
     if (deformCache)
     {
-        // Deform cache completely replaces this object -- recurse only into it
         CollectFromCache(deformCache, worldMg, doc, splineSubdiv);
         return;
     }
@@ -117,16 +141,11 @@ void GeometryCollector::CollectPolygonObject(PolygonObject* polyObj, const Matri
     if (!points || !polys)
         return;
 
-    // Base index for all points of this object
     Int32 baseIdx = (Int32)m_geometry.points.size();
 
-    // Add points in world coordinates
     for (Int32 i = 0; i < pointCount; i++)
-    {
         m_geometry.points.push_back(worldMg * points[i]);
-    }
 
-    // Deduplicated edges
     std::set<std::pair<Int32,Int32>> edgeSet;
 
     for (Int32 i = 0; i < polyCount; i++)
@@ -141,16 +160,16 @@ void GeometryCollector::CollectPolygonObject(PolygonObject* polyObj, const Matri
         bool isTriangle = (poly.c == poly.d);
 
         if (isTriangle)
-            m_geometry.polygons.push_back({a, b, c});
+            m_geometry.polygons.push_back({ {a, b, c}, m_currentColor });
         else
-            m_geometry.polygons.push_back({a, b, c, d});
+            m_geometry.polygons.push_back({ {a, b, c, d}, m_currentColor });
 
         auto addEdge = [&](Int32 p0, Int32 p1)
         {
             std::pair<Int32,Int32> edge = (p0 < p1) ? std::make_pair(p0, p1)
                                                      : std::make_pair(p1, p0);
             if (edgeSet.insert(edge).second)
-                m_geometry.lines.push_back(edge);
+                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness });
         };
 
         addEdge(a, b);
@@ -173,7 +192,6 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
     if (!splineObj)
         return;
 
-    // Prefer interpolated (real) spline
     SplineObject* realSpline = splineObj->GetRealSpline();
     SplineObject* workSpline = realSpline ? realSpline : splineObj;
 
@@ -187,12 +205,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
     if (!rawPoints)
         return;
 
-    // If no segments, treat the whole spline as one segment
     bool hasSegments = (segCount > 0);
     if (!hasSegments)
         segCount = 1;
 
-    SPLINETYPE splineType       = workSpline->GetInterpolationType();
+    SPLINETYPE splineType = workSpline->GetInterpolationType();
     bool  needsInterpolation = (splineType != SPLINETYPE::LINEAR);
 
     Int32 startPt = 0;
@@ -229,15 +246,15 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
                 m_geometry.points.push_back(worldMg * rawPoints[startPt + i]);
 
             for (Int32 i = 0; i < segPointCount - 1; i++)
-                m_geometry.lines.push_back({baseIdx + i, baseIdx + i + 1});
+                m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
+                                             m_currentColor, m_currentThickness });
 
             if (closed)
-                m_geometry.lines.push_back({baseIdx + segPointCount - 1, baseIdx});
+                m_geometry.lines.push_back({ baseIdx + segPointCount - 1, baseIdx,
+                                             m_currentColor, m_currentThickness });
         }
         else
         {
-            // Use GetSplinePoint for interpolated splines.
-            // t in [0..1] is relative to the given segment.
             Int32 samplesPerSeg = Max(1, splineSubdiv * 4);
             Int32 totalSamples  = (segPointCount - 1) * samplesPerSeg + 1;
 
@@ -249,13 +266,14 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
             }
 
             for (Int32 i = 0; i < totalSamples - 1; i++)
-                m_geometry.lines.push_back({baseIdx + i, baseIdx + i + 1});
+                m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
+                                             m_currentColor, m_currentThickness });
 
             if (closed)
-                m_geometry.lines.push_back({baseIdx + totalSamples - 1, baseIdx});
+                m_geometry.lines.push_back({ baseIdx + totalSamples - 1, baseIdx,
+                                             m_currentColor, m_currentThickness });
         }
 
-        // Closed splines are also stored as polygons for fill
         if (closed)
         {
             Int32 addedCount = (Int32)m_geometry.points.size() - baseIdx;
@@ -263,7 +281,7 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
             splinePoly.reserve(addedCount);
             for (Int32 i = 0; i < addedCount; i++)
                 splinePoly.push_back(baseIdx + i);
-            m_geometry.closed_splines.push_back(std::move(splinePoly));
+            m_geometry.closed_splines.push_back({ std::move(splinePoly), m_currentColor });
         }
 
         startPt += segPointCount;

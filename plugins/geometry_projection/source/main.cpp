@@ -6,6 +6,7 @@
 
 extern Bool RegisterGeometryProjectorObject();
 extern Bool RegisterProjectionShader();
+extern Bool RegisterProjectionSettingsTag();
 
 Bool PluginStart()
 {
@@ -18,6 +19,12 @@ Bool PluginStart()
     if (!RegisterGeometryProjectorObject())
     {
         GePrint("GeometryProjector: RegisterGeometryProjectorObject FAILED!"_s);
+        return false;
+    }
+
+    if (!RegisterProjectionSettingsTag())
+    {
+        GePrint("GeometryProjector: RegisterProjectionSettingsTag FAILED!"_s);
         return false;
     }
 

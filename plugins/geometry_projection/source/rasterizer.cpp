@@ -3,6 +3,62 @@
 #include "rasterizer.h"
 #include <algorithm>
 #include <map>
+#include <tuple>
+
+// ==================== UV line clipping (Cohen-Sutherland) ====================
+// Clips a line segment to the [0..1] UV box so geometry outside the target
+// object's bounds does not draw a strip at the bitmap edge.
+
+static const int CS_INSIDE = 0, CS_LEFT = 1, CS_RIGHT = 2, CS_BOTTOM = 4, CS_TOP = 8;
+
+static int CS_OutCode(Float u, Float v)
+{
+    int code = CS_INSIDE;
+    if (u < 0.0) code |= CS_LEFT;
+    else if (u > 1.0) code |= CS_RIGHT;
+    if (v < 0.0) code |= CS_BOTTOM;
+    else if (v > 1.0) code |= CS_TOP;
+    return code;
+}
+
+static bool CS_ClipLine(Float& u0, Float& v0, Float& u1, Float& v1)
+{
+    int code0 = CS_OutCode(u0, v0);
+    int code1 = CS_OutCode(u1, v1);
+
+    while (true)
+    {
+        if (!(code0 | code1)) return true;   // Both inside
+        if (code0 & code1)   return false;   // Both outside same region
+
+        Float u, v;
+        int codeOut = code0 ? code0 : code1;
+
+        if (codeOut & CS_TOP)
+        {
+            u = u0 + (u1 - u0) * (1.0 - v0) / (v1 - v0);
+            v = 1.0;
+        }
+        else if (codeOut & CS_BOTTOM)
+        {
+            u = u0 + (u1 - u0) * (0.0 - v0) / (v1 - v0);
+            v = 0.0;
+        }
+        else if (codeOut & CS_RIGHT)
+        {
+            v = v0 + (v1 - v0) * (1.0 - u0) / (u1 - u0);
+            u = 1.0;
+        }
+        else // CS_LEFT
+        {
+            v = v0 + (v1 - v0) * (0.0 - u0) / (u1 - u0);
+            u = 0.0;
+        }
+
+        if (codeOut == code0) { u0 = u; v0 = v; code0 = CS_OutCode(u0, v0); }
+        else                  { u1 = u; v1 = v; code1 = CS_OutCode(u1, v1); }
+    }
+}
 
 // ==================== Entry point ====================
 
@@ -14,10 +70,8 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
     m_height   = settings.previewResolution;
     m_settings = settings;
 
-    // Convert colors to 0-255
-    m_fgR = ClampI((Int32)(settings.fgColor.x * 255.0), 0, 255);
-    m_fgG = ClampI((Int32)(settings.fgColor.y * 255.0), 0, 255);
-    m_fgB = ClampI((Int32)(settings.fgColor.z * 255.0), 0, 255);
+    // Convert global colors to 0-255 (used for background, and as fallback
+    // for polygon outlines which don't have per-object colors)
     m_bgR = ClampI((Int32)(settings.bgColor.x * 255.0), 0, 255);
     m_bgG = ClampI((Int32)(settings.bgColor.y * 255.0), 0, 255);
     m_bgB = ClampI((Int32)(settings.bgColor.z * 255.0), 0, 255);
@@ -35,7 +89,6 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
     // Y is flipped: UV v=0 is at the bottom, bitmap y=0 is at the top.
     std::vector<std::pair<Int32,Int32>> pixelPts;
     pixelPts.reserve(ptCount);
-
     for (Int32 i = 0; i < ptCount; i++)
     {
         Float u = projected.points2d[i].first;
@@ -43,85 +96,114 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         pixelPts.push_back({ UtoX(u), VtoY(1.0 - v) });
     }
 
-    // 1. Fill polygons
+    // Helper: convert a Vector color to 0-255 RGB
+    auto to255 = [](const Vector& c) -> std::tuple<Int32,Int32,Int32> {
+        return std::make_tuple(
+            ClampI((Int32)(c.x * 255.0), 0, 255),
+            ClampI((Int32)(c.y * 255.0), 0, 255),
+            ClampI((Int32)(c.z * 255.0), 0, 255)
+        );
+    };
+
+    // 1. Fill polygons (per-object color)
     if (settings.drawFill)
     {
         for (const auto& poly : projected.polygons)
         {
-            if ((Int32)poly.size() < 3) continue;
+            if ((Int32)poly.indices.size() < 3) continue;
+            auto [r, g, b] = to255(poly.color);
             std::vector<std::pair<Int32,Int32>> corners;
-            corners.reserve(poly.size());
-            for (Int32 idx : poly)
+            corners.reserve(poly.indices.size());
+            for (Int32 idx : poly.indices)
             {
                 if (idx >= 0 && idx < ptCount)
                     corners.push_back(pixelPts[idx]);
             }
-            ScanlineFill(corners, m_fgR, m_fgG, m_fgB, alpha);
+            ScanlineFill(corners, r, g, b, alpha);
         }
 
-        // Fill closed splines
+        // Fill closed splines (per-object color)
         for (const auto& sp : projected.closedSplines)
         {
-            if ((Int32)sp.size() < 3) continue;
+            if ((Int32)sp.indices.size() < 3) continue;
+            auto [r, g, b] = to255(sp.color);
             std::vector<std::pair<Int32,Int32>> corners;
-            corners.reserve(sp.size());
-            for (Int32 idx : sp)
+            corners.reserve(sp.indices.size());
+            for (Int32 idx : sp.indices)
             {
                 if (idx >= 0 && idx < ptCount)
                     corners.push_back(pixelPts[idx]);
             }
-            ScanlineFill(corners, m_fgR, m_fgG, m_fgB, alpha);
+            ScanlineFill(corners, r, g, b, alpha);
         }
     }
 
-    // 2. Polygon outlines (no caps)
+    // 2. Polygon outlines (per-object color, global thickness)
     if (settings.drawOutline)
     {
         Float outThick = settings.scaledOutlineWidth;
         for (const auto& poly : projected.polygons)
         {
-            Int32 n = (Int32)poly.size();
+            Int32 n = (Int32)poly.indices.size();
             if (n < 2) continue;
+            auto [r, g, b] = to255(poly.color);
             for (Int32 i = 0; i < n; i++)
             {
-                Int32 ia = poly[i];
-                Int32 ib = poly[(i + 1) % n];
+                Int32 ia = poly.indices[i];
+                Int32 ib = poly.indices[(i + 1) % n];
                 if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
-                DrawThickLine(pixelPts[ia].first, pixelPts[ia].second,
-                               pixelPts[ib].first, pixelPts[ib].second,
-                               m_fgR, m_fgG, m_fgB, alpha,
-                               outThick, false, false);
+
+                // UV-clip the outline segment to [0..1] so it doesn't draw
+                // a strip at the bitmap edge when the polygon extends outside
+                // the target object's bounds.
+                Float u0 = projected.points2d[ia].first;
+                Float v0 = projected.points2d[ia].second;
+                Float u1 = projected.points2d[ib].first;
+                Float v1 = projected.points2d[ib].second;
+                if (!CS_ClipLine(u0, v0, u1, v1)) continue;
+
+                DrawThickLine(UtoX(u0), VtoY(1.0 - v0),
+                               UtoX(u1), VtoY(1.0 - v1),
+                               r, g, b, alpha, outThick, false, false);
             }
         }
     }
 
-    // 3. Edge lines with caps.
-    // A cap is drawn only at true endpoints (connection count == 1).
+    // 3. Edge lines with caps (per-object color and thickness)
     std::map<Int32, Int32> pointConnections;
     for (const auto& line : projected.lines)
     {
-        pointConnections[line.first]++;
-        pointConnections[line.second]++;
+        pointConnections[line.v0]++;
+        pointConnections[line.v1]++;
     }
 
-    Float lineThick = settings.scaledLineWidth;
     for (const auto& line : projected.lines)
     {
-        Int32 ia = line.first;
-        Int32 ib = line.second;
+        Int32 ia = line.v0;
+        Int32 ib = line.v1;
         if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
+
+        // UV-clip the line to [0..1] to avoid edge strips
+        Float u0 = projected.points2d[ia].first;
+        Float v0 = projected.points2d[ia].second;
+        Float u1 = projected.points2d[ib].first;
+        Float v1 = projected.points2d[ib].second;
+        if (!CS_ClipLine(u0, v0, u1, v1)) continue;
+
+        auto [r, g, b] = to255(line.color);
+        Float thick = settings.ScaleLineWidth(line.thickness, m_width);
 
         bool capA = (pointConnections[ia] == 1);
         bool capB = (pointConnections[ib] == 1);
 
-        DrawThickLine(pixelPts[ia].first, pixelPts[ia].second,
-                       pixelPts[ib].first, pixelPts[ib].second,
-                       m_fgR, m_fgG, m_fgB, alpha,
-                       lineThick, capA, capB);
+        DrawThickLine(UtoX(u0), VtoY(1.0 - v0),
+                       UtoX(u1), VtoY(1.0 - v1),
+                       r, g, b, alpha, thick, capA, capB);
     }
 
     return Flush();
 }
+
 
 // ==================== Buffers ====================
 

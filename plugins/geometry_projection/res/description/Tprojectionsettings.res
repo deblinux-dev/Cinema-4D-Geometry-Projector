@@ -1,0 +1,14 @@
+CONTAINER Tprojectionsettings
+{
+    NAME Tprojectionsettings;
+    INCLUDE Tbase;
+
+    GROUP ID_TAGPROPERTIES
+    {
+        DEFAULT 1;
+        BOOL PROJTAG_OVERRIDE_COLOR { }
+        COLOR PROJTAG_COLOR { }
+        BOOL PROJTAG_OVERRIDE_THICKNESS { }
+        REAL PROJTAG_THICKNESS { UNIT METER; MIN 0.1; MAX 100; STEP 0.5; }
+    }
+}

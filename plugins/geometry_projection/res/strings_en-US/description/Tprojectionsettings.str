@@ -1,0 +1,8 @@
+STRINGTABLE Tprojectionsettings
+{
+    Tprojectionsettings "Projection Object Settings";
+    PROJTAG_OVERRIDE_COLOR "Override Color";
+    PROJTAG_COLOR "Color";
+    PROJTAG_OVERRIDE_THICKNESS "Override Thickness";
+    PROJTAG_THICKNESS "Thickness";
+}

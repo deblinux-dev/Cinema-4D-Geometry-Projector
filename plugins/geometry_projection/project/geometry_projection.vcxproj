@@ -122,17 +122,20 @@
     <ClCompile Include="..\source\geometry_projector.cpp" />
     <ClCompile Include="..\source\main.cpp" />
     <ClCompile Include="..\source\projection_shader.cpp" />
+    <ClCompile Include="..\source\projection_tag.cpp" />
     <ClCompile Include="..\source\projector_object.cpp" />
     <ClCompile Include="..\source\rasterizer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\res\c4d_symbols.h" />
     <ClInclude Include="..\res\description\Ogeometryprojector.h" />
+    <ClInclude Include="..\res\description\Tprojectionsettings.h" />
     <ClInclude Include="..\res\description\Xprojectionshader.h" />
     <ClInclude Include="..\source\geometry_collector.h" />
     <ClInclude Include="..\source\geometry_projector.h" />
     <ClInclude Include="..\source\projection_cache.h" />
     <ClInclude Include="..\source\projection_shader.h" />
+    <ClInclude Include="..\source\projection_tag.h" />
     <ClInclude Include="..\source\projector_object.h" />
     <ClInclude Include="..\source\rasterizer.h" />
   </ItemGroup>
