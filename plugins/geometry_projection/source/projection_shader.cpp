@@ -28,10 +28,13 @@ SHADERINFO ProjectionShader::GetRenderInfo(BaseShader* sh)
 
 INITRENDERRESULT ProjectionShader::InitRender(BaseShader* sh, const InitRenderStruct& irs)
 {
+    // Reset the per-render snapshot state. The actual pixel data is fetched
+    // lazily in Output() so it always reflects the latest cache version.
     m_pixelData.clear();
     m_bitmapWidth    = 0;
     m_bitmapHeight   = 0;
     m_snapshotVersion = -1;
+    m_cacheId        = 0;
 
     BaseContainer* data = sh->GetDataInstance();
     if (!data) return INITRENDERRESULT::OK;
@@ -41,7 +44,10 @@ INITRENDERRESULT ProjectionShader::InitRender(BaseShader* sh, const InitRenderSt
     BaseDocument* doc = irs.doc;
     if (!doc) return INITRENDERRESULT::OK;
 
-    // Resolve the projector object via the link parameter
+    // Resolve the projector object and stash its persistent cache ID.
+    // The ID is identical for the original projector and its render clones
+    // (set in Init/CopyTo), so the shader can always reach the right cache
+    // through the global CacheRegistry, even from a render-thread clone.
     BaseObject* projObj = static_cast<BaseObject*>(
         data->GetLink(SHADER_PROJECTOR_LINK, doc, PLUGIN_ID_PROJECTOR_OBJECT));
     if (!projObj) return INITRENDERRESULT::OK;
@@ -49,38 +55,10 @@ INITRENDERRESULT ProjectionShader::InitRender(BaseShader* sh, const InitRenderSt
     BaseContainer* projData = projObj->GetDataInstance();
     if (!projData) return INITRENDERRESULT::OK;
 
-    // Получаем постоянный сессионный ID из контейнера для связки оригинального объекта и рендер-клона
     Int64 cacheId = projData->GetInt64(PARAM_CACHE_ID);
     if (cacheId == 0)
-        cacheId = (Int64)(intptr_t)projObj; // Запасной вариант
-
-    ProjectionCache* cache = CacheRegistry::Instance().Get(cacheId);
-    if (!cache || !cache->bitmap || !cache->rasterValid)
-        return INITRENDERRESULT::OK;
-
-    Int32 bw = cache->bitmap->GetBw();
-    Int32 bh = cache->bitmap->GetBh();
-    if (bw <= 0 || bh <= 0) return INITRENDERRESULT::OK;
-
-    m_bitmapWidth  = bw;
-    m_bitmapHeight = bh;
-    m_pixelData.resize(bw * bh * 3);
-
-    // Read pixel data row by row via GetPixelCnt.
-    std::vector<uint8_t> rowBuf(bw * 3);
-    for (Int32 y = 0; y < bh; y++)
-    {
-        cache->bitmap->GetPixelCnt(0, y, bw, rowBuf.data(), 3, COLORMODE::RGB, PIXELCNT::NONE);
-        uint8_t* dst = m_pixelData.data() + y * bw * 3;
-        for (Int32 x = 0; x < bw; x++)
-        {
-            dst[x * 3 + 0] = rowBuf[x * 3 + 0];
-            dst[x * 3 + 1] = rowBuf[x * 3 + 1];
-            dst[x * 3 + 2] = rowBuf[x * 3 + 2];
-        }
-    }
-
-    m_snapshotVersion = cache->version.load();
+        cacheId = (Int64)(intptr_t)projObj; // fallback (editor, not render clone)
+    m_cacheId = cacheId;
 
     return INITRENDERRESULT::OK;
 }
@@ -97,6 +75,12 @@ void ProjectionShader::FreeRender(BaseShader* sh)
 
 Vector ProjectionShader::Output(BaseShader* sh, ChannelData* cd)
 {
+    // Lazily refresh the pixel snapshot if the projector's cache bitmap
+    // changed since the last sample. This is what makes the shader update in
+    // real time in the viewport when the user moves/edits source objects or
+    // the camera, instead of only when the timeline plays.
+    RefreshSnapshot(sh);
+
     if (m_pixelData.empty() || m_bitmapWidth == 0)
         return CheckerPattern(cd->p.x, cd->p.y);
 
@@ -110,6 +94,59 @@ Vector ProjectionShader::Output(BaseShader* sh, ChannelData* cd)
     // by C4D's material system). Non-replace modes therefore return the sample
     // directly for now; the blend enum is kept for future VolumeData-based use.
     return sample;
+}
+
+// ==================== RefreshSnapshot ====================
+
+void ProjectionShader::RefreshSnapshot(BaseShader* sh)
+{
+    Int64 cacheId = m_cacheId;
+
+    // If InitRender did not resolve a cache ID yet (e.g. viewport preview
+    // before the first render), try to resolve it now from the shader's link.
+    if (cacheId == 0)
+    {
+        BaseContainer* data = sh->GetDataInstance();
+        if (!data) return;
+        BaseDocument* doc = sh->GetDocument();
+        if (!doc) return;
+        BaseObject* projObj = static_cast<BaseObject*>(
+            data->GetLink(SHADER_PROJECTOR_LINK, doc, PLUGIN_ID_PROJECTOR_OBJECT));
+        if (!projObj) return;
+        BaseContainer* projData = projObj->GetDataInstance();
+        if (!projData) return;
+        cacheId = projData->GetInt64(PARAM_CACHE_ID);
+        if (cacheId == 0) cacheId = (Int64)(intptr_t)projObj;
+        m_cacheId = cacheId;
+    }
+    if (cacheId == 0) return;
+
+    ProjectionCache* cache = CacheRegistry::Instance().Get(cacheId);
+    if (!cache) return;
+
+    Int32 currentVersion = cache->version.load(std::memory_order_acquire);
+
+    // Fast path: snapshot already current. Read m_snapshotVersion under the
+    // lock to avoid tearing with a concurrent refresh.
+    {
+        std::lock_guard<std::mutex> lock(m_refreshMutex);
+        if (currentVersion == m_snapshotVersion && !m_pixelData.empty())
+            return;
+    }
+
+    // Slow path: copy the cache bitmap's pixels into our private buffer.
+    // SnapshotPixels() takes the cache's bitmap mutex, so this is safe even if
+    // the projector replaces the bitmap concurrently.
+    std::vector<uint8_t> newPixels;
+    Int32 newW = 0, newH = 0;
+    if (!cache->SnapshotPixels(newPixels, newW, newH))
+        return;
+
+    std::lock_guard<std::mutex> lock(m_refreshMutex);
+    m_pixelData      = std::move(newPixels);
+    m_bitmapWidth    = newW;
+    m_bitmapHeight   = newH;
+    m_snapshotVersion = currentVersion;
 }
 
 // ==================== SamplePixelData ====================

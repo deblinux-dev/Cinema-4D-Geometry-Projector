@@ -52,11 +52,15 @@ struct ProjectionCache
     UInt32             projectionHash  = 0;
 
     // Level 3: rasterized bitmap
+    // bitmap is replaced by the projector thread (DoUpdate) and read by shader
+    // render threads (Output -> RefreshSnapshot). The mutex guards all access
+    // to the bitmap pointer so a reader never sees a half-freed bitmap.
     BaseBitmap*        bitmap          = nullptr;
     Int32              bitmapWidth     = 0;
     Int32              bitmapHeight    = 0;
     bool               rasterValid     = false;
     UInt32             rasterHash      = 0;
+    std::mutex         bitmapMutex;
 
     // Incremented each time the bitmap is replaced; read by shader in InitRender
     std::atomic<Int32> version{0};
@@ -69,6 +73,7 @@ struct ProjectionCache
 
     void FreeBitmap()
     {
+        std::lock_guard<std::mutex> lock(bitmapMutex);
         if (bitmap)
         {
             BaseBitmap::Free(bitmap);
@@ -80,13 +85,51 @@ struct ProjectionCache
 
     void SetBitmap(BaseBitmap* bm)
     {
-        FreeBitmap();
-        bitmap = bm;
-        if (bm)
+        // Free the old bitmap OUTSIDE the lock to avoid holding the mutex while
+        // C4D's allocator runs (BaseBitmap::Free can be slow). We swap the
+        // pointer atomically under the lock, then free the old one.
+        BaseBitmap* oldBm = nullptr;
         {
-            bitmapWidth  = bm->GetBw();
-            bitmapHeight = bm->GetBh();
+            std::lock_guard<std::mutex> lock(bitmapMutex);
+            oldBm  = bitmap;
+            bitmap = bm;
+            if (bm)
+            {
+                bitmapWidth  = bm->GetBw();
+                bitmapHeight = bm->GetBh();
+            }
+            else
+            {
+                bitmapWidth  = 0;
+                bitmapHeight = 0;
+            }
         }
+        if (oldBm) BaseBitmap::Free(oldBm);
+    }
+
+    // Thread-safe snapshot of the current bitmap's pixel data.
+    // Called from shader render threads. Copies RGB pixels into 'outBuf'
+    // (sized bw*bh*3). Returns false if no valid bitmap is available.
+    // The caller is responsible for allocating outBuf with the returned size.
+    bool SnapshotPixels(std::vector<uint8_t>& outBuf, Int32& outW, Int32& outH)
+    {
+        std::lock_guard<std::mutex> lock(bitmapMutex);
+        if (!bitmap || !rasterValid) return false;
+        Int32 bw = bitmap->GetBw();
+        Int32 bh = bitmap->GetBh();
+        if (bw <= 0 || bh <= 0) return false;
+
+        outW = bw;
+        outH = bh;
+        outBuf.resize((size_t)bw * bh * 3);
+
+        std::vector<uint8_t> rowBuf((size_t)bw * 3);
+        for (Int32 y = 0; y < bh; y++)
+        {
+            bitmap->GetPixelCnt(0, y, bw, rowBuf.data(), 3, COLORMODE::RGB, PIXELCNT::NONE);
+            memcpy(outBuf.data() + (size_t)y * bw * 3, rowBuf.data(), (size_t)bw * 3);
+        }
+        return true;
     }
 
     void InvalidateAll()

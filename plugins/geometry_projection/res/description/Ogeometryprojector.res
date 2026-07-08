@@ -8,6 +8,7 @@ CONTAINER Ogeometryprojector
         DEFAULT 1;
         IN_EXCLUDE SOURCE_OBJECTS { }
         LINK TARGET_MATERIAL { ACCEPT { Mmaterial; } }
+        LINK TARGET_OBJECT { ACCEPT { Obase; } }
         LONG TARGET_CHANNEL
         {
             CYCLE

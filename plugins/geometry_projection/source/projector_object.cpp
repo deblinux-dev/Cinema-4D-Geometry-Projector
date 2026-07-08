@@ -174,6 +174,12 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
     if (mat)
         sum += mat->GetDirty(DIRTYFLAGS::DATA);
 
+    // Target object (the surface geometry is projected onto; its bounds drive
+    // the UV layout, so any transform change must trigger a re-projection)
+    BaseObject* tgtObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
+    if (tgtObj)
+        sum += tgtObj->GetDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
+
     // Camera in camera mode (explicit link OR editor camera)
     if (data->GetInt32(PROJ_MODE, PROJ_MODE_FLAT_Z) == PROJ_MODE_CAMERA)
     {
@@ -247,7 +253,11 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
 
     Int32 previewRes = GetResolutionFromParam(data->GetInt32(PREVIEW_RESOLUTION, PREVIEW_RES_256));
 
-    BaseObject* targetObj = srcObjs[0];
+    // The TARGET OBJECT is the surface the geometry is projected ONTO (e.g. the
+    // plane). Its world-space bounding box defines the UV layout, so a 1x1 cube
+    // on a 10x10 plane occupies 0.1x0.1 of UV. Previously this used srcObjs[0]
+    // (the cube itself), which made the cube stretch to fill the whole UV.
+    BaseObject* targetObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
     ProjectionSettings settings = ProjectionSettings::FromContainer(data, previewRes, targetObj, doc);
 
     ProjectionCache* cache = GetCache(op);

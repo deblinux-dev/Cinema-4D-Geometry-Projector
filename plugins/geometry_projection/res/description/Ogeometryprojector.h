@@ -14,6 +14,7 @@ enum
     SOURCE_OBJECTS          = 1001,
     TARGET_MATERIAL         = 1002,
     TARGET_CHANNEL          = 1003,
+    TARGET_OBJECT           = 1004,
 
     TCH_COLOR               = 0,
     TCH_LUMINANCE           = 1,

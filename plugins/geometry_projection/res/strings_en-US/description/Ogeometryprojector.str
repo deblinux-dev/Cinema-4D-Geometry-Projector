@@ -10,6 +10,7 @@ STRINGTABLE Ogeometryprojector
     GRP_BUTTONS "Actions";
     SOURCE_OBJECTS "Source Objects";
     TARGET_MATERIAL "Target Material";
+    TARGET_OBJECT "Target Object (UV bounds)";
     TARGET_CHANNEL "Target Channel";
     TCH_COLOR "Color";
     TCH_LUMINANCE "Luminance";
