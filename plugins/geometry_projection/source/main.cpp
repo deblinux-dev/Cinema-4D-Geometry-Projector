@@ -2,6 +2,7 @@
 // Entry point: registers GeometryProjectorObject and ProjectionShader
 
 #include "c4d.h"
+#include "projection_cache.h"
 
 extern Bool RegisterGeometryProjectorObject();
 extern Bool RegisterProjectionShader();
@@ -45,6 +46,5 @@ void PluginEnd()
 {
     // Clear the cache registry to avoid calling BaseBitmap::Free()
     // after C4D has already cleaned up its allocator
-    extern void ClearCacheRegistry();
     ClearCacheRegistry();
 }
