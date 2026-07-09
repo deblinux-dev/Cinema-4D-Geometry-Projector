@@ -6,7 +6,9 @@ enum
     PROJTAG_OVERRIDE_THICKNESS = 3001,
     PROJTAG_THICKNESS          = 3002,
     PROJTAG_OVERRIDE_COLOR     = 3003,
-    PROJTAG_COLOR              = 3004
+    PROJTAG_COLOR              = 3004,
+    PROJTAG_OVERRIDE_FILL      = 3005,
+    PROJTAG_FILL               = 3006
 };
 
 #endif

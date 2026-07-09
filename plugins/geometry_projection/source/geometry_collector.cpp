@@ -9,11 +9,13 @@ void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
                                  BaseDocument* doc,
                                  Int32 splineSubdiv,
                                  Vector defaultColor,
-                                 Float defaultThickness)
+                                 Float defaultThickness,
+                                 Bool  defaultFill)
 {
     m_geometry.Clear();
     m_defaultColor     = defaultColor;
     m_defaultThickness = defaultThickness;
+    m_defaultFill      = defaultFill;
 
     for (BaseObject* obj : objects)
     {
@@ -28,11 +30,13 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     if (!obj)
         return;
 
-    // Resolve per-object color and thickness from the ProjectionSettingsTag.
+    // Resolve per-object color, thickness and fill from the ProjectionSettingsTag.
     // If the tag is not present, or the override flags are off, fall back to
     // the global defaults passed from ProjectionSettings.
     m_currentColor     = m_defaultColor;
     m_currentThickness = m_defaultThickness;
+    m_currentFillOverride = false;
+    m_currentFill        = m_defaultFill;
 
     BaseTag* tag = obj->GetTag(PLUGIN_ID_PROJECTION_TAG);
     if (tag)
@@ -44,34 +48,43 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
                 m_currentColor = td->GetVector(PROJTAG_COLOR, m_defaultColor);
             if (td->GetBool(PROJTAG_OVERRIDE_THICKNESS))
                 m_currentThickness = td->GetFloat(PROJTAG_THICKNESS, m_defaultThickness);
+            if (td->GetBool(PROJTAG_OVERRIDE_FILL))
+            {
+                m_currentFillOverride = true;
+                m_currentFill        = td->GetBool(PROJTAG_FILL, m_defaultFill);
+            }
         }
     }
 
-    // For spline objects (editable OR parametric like Circle/Rectangle/Arc),
-    // ALWAYS try GetRealSpline() first. GetRealSpline() forces C4D to build
-    // the interpolated spline on demand, which is critical for parametric
-    // splines whose cache may be stale/empty right after a transform (that
-    // was causing splines to disappear after any action). For editable
-    // splines GetRealSpline() returns the object itself.
+    // For spline objects (editable OR parametric like Circle/Rectangle/Arc):
+    //  - Editable splines store points directly on the object (GetPointCount() >= 2)
+    //  - Parametric splines (Circle, Rectangle) have NO points on the object;
+    //    their geometry lives in the CACHE as a generated Ospline.
+    //    GetRealSpline() returns nullptr for them per SDK docs, so we must
+    //    walk the cache to find the generated Ospline.
     if (obj->IsInstanceOf(Ospline))
     {
         SplineObject* splineObj = static_cast<SplineObject*>(obj);
-        SplineObject* realSpline = splineObj->GetRealSpline();
-        if (realSpline && realSpline->GetPointCount() >= 2)
-        {
-            CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
-            return;
-        }
-        // Fallback: editable spline with points stored directly on the object
+
+        // Editable spline: points are on the object itself
         if (splineObj->GetPointCount() >= 2)
         {
             CollectSpline(splineObj, obj->GetMg(), splineSubdiv);
             return;
         }
-        // Last resort: try the cache (may contain a generated spline)
+
+        // Parametric spline: walk the cache (deform > generator) to find the
+        // generated Ospline. CollectFromCache recurses into children/sub-caches
+        // and uses IsInstanceOf(Ospline), so it will find the real spline
+        // wherever C4D put it.
         BaseObject* cache = GetBestCache(obj);
         if (cache)
+        {
             CollectFromCache(cache, obj->GetMg(), doc, splineSubdiv);
+            return;
+        }
+        // No cache yet (first eval pass) -- nothing to collect this frame.
+        // The next dirty tick after C4D builds the cache will retry.
         return;
     }
 
@@ -188,16 +201,16 @@ void GeometryCollector::CollectPolygonObject(PolygonObject* polyObj, const Matri
         bool isTriangle = (poly.c == poly.d);
 
         if (isTriangle)
-            m_geometry.polygons.push_back({ {a, b, c}, m_currentColor });
+            m_geometry.polygons.push_back({ {a, b, c}, m_currentColor, m_currentFillOverride, m_currentFill });
         else
-            m_geometry.polygons.push_back({ {a, b, c, d}, m_currentColor });
+            m_geometry.polygons.push_back({ {a, b, c, d}, m_currentColor, m_currentFillOverride, m_currentFill });
 
         auto addEdge = [&](Int32 p0, Int32 p1)
         {
             std::pair<Int32,Int32> edge = (p0 < p1) ? std::make_pair(p0, p1)
                                                      : std::make_pair(p1, p0);
             if (edgeSet.insert(edge).second)
-                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness });
+                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness, false });
         };
 
         addEdge(a, b);
@@ -275,11 +288,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
 
             for (Int32 i = 0; i < segPointCount - 1; i++)
                 m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
-                                             m_currentColor, m_currentThickness });
+                                             m_currentColor, m_currentThickness, true });
 
             if (closed)
                 m_geometry.lines.push_back({ baseIdx + segPointCount - 1, baseIdx,
-                                             m_currentColor, m_currentThickness });
+                                             m_currentColor, m_currentThickness, true });
         }
         else
         {
@@ -295,11 +308,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
 
             for (Int32 i = 0; i < totalSamples - 1; i++)
                 m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
-                                             m_currentColor, m_currentThickness });
+                                             m_currentColor, m_currentThickness, true });
 
             if (closed)
                 m_geometry.lines.push_back({ baseIdx + totalSamples - 1, baseIdx,
-                                             m_currentColor, m_currentThickness });
+                                             m_currentColor, m_currentThickness, true });
         }
 
         if (closed)
@@ -309,7 +322,7 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
             splinePoly.reserve(addedCount);
             for (Int32 i = 0; i < addedCount; i++)
                 splinePoly.push_back(baseIdx + i);
-            m_geometry.closed_splines.push_back({ std::move(splinePoly), m_currentColor });
+            m_geometry.closed_splines.push_back({ std::move(splinePoly), m_currentColor, m_currentFillOverride, m_currentFill });
         }
 
         startPt += segPointCount;

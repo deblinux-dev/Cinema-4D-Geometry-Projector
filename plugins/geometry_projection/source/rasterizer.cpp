@@ -178,55 +178,62 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         );
     };
 
-    // 1. Fill polygons (per-object color), UV-clipped to [0..1]
-    if (settings.drawFill)
+    // 1. Fill polygons. An object can override the global Draw Fill setting
+    // via its ProjectionSettingsTag (poly.fillOverride). When overridden and
+    // poly.fill is true, fill even if global drawFill is false; when overridden
+    // and false, skip even if global drawFill is true.
+    auto shouldFill = [&](const CollectedPolygon& p) -> bool {
+        if (p.fillOverride) return p.fill;
+        return settings.drawFill;
+    };
+
+    for (const auto& poly : projected.polygons)
     {
-        for (const auto& poly : projected.polygons)
+        if ((Int32)poly.indices.size() < 3) continue;
+        if (!shouldFill(poly)) continue;
+        auto [r, g, b] = to255(poly.color);
+
+        // Build UV polygon and clip to [0..1] so fills outside the target
+        // bounds don't leave a 1-pixel strip at the bitmap edge.
+        std::vector<UVPoint> uvPoly;
+        uvPoly.reserve(poly.indices.size());
+        for (Int32 idx : poly.indices)
         {
-            if ((Int32)poly.indices.size() < 3) continue;
-            auto [r, g, b] = to255(poly.color);
-
-            // Build UV polygon and clip to [0..1] so fills outside the target
-            // bounds don't leave a 1-pixel strip at the bitmap edge.
-            std::vector<UVPoint> uvPoly;
-            uvPoly.reserve(poly.indices.size());
-            for (Int32 idx : poly.indices)
-            {
-                if (idx >= 0 && idx < ptCount)
-                    uvPoly.push_back(projected.points2d[idx]);
-            }
-            uvPoly = SH_ClipPolygon(std::move(uvPoly));
-            if (uvPoly.size() < 3) continue;
-
-            std::vector<std::pair<Int32,Int32>> corners;
-            corners.reserve(uvPoly.size());
-            for (const auto& uv : uvPoly)
-                corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
-            ScanlineFill(corners, r, g, b, alpha);
+            if (idx >= 0 && idx < ptCount)
+                uvPoly.push_back(projected.points2d[idx]);
         }
+        uvPoly = SH_ClipPolygon(std::move(uvPoly));
+        if (uvPoly.size() < 3) continue;
 
-        // Fill closed splines (per-object color), UV-clipped
-        for (const auto& sp : projected.closedSplines)
+        std::vector<std::pair<Int32,Int32>> corners;
+        corners.reserve(uvPoly.size());
+        for (const auto& uv : uvPoly)
+            corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
+        ScanlineFill(corners, r, g, b, alpha);
+    }
+
+    // Fill closed splines (per-object override applies too)
+    for (const auto& sp : projected.closedSplines)
+    {
+        if ((Int32)sp.indices.size() < 3) continue;
+        if (!shouldFill(sp)) continue;
+        auto [r, g, b] = to255(sp.color);
+
+        std::vector<UVPoint> uvPoly;
+        uvPoly.reserve(sp.indices.size());
+        for (Int32 idx : sp.indices)
         {
-            if ((Int32)sp.indices.size() < 3) continue;
-            auto [r, g, b] = to255(sp.color);
-
-            std::vector<UVPoint> uvPoly;
-            uvPoly.reserve(sp.indices.size());
-            for (Int32 idx : sp.indices)
-            {
-                if (idx >= 0 && idx < ptCount)
-                    uvPoly.push_back(projected.points2d[idx]);
-            }
-            uvPoly = SH_ClipPolygon(std::move(uvPoly));
-            if (uvPoly.size() < 3) continue;
-
-            std::vector<std::pair<Int32,Int32>> corners;
-            corners.reserve(uvPoly.size());
-            for (const auto& uv : uvPoly)
-                corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
-            ScanlineFill(corners, r, g, b, alpha);
+            if (idx >= 0 && idx < ptCount)
+                uvPoly.push_back(projected.points2d[idx]);
         }
+        uvPoly = SH_ClipPolygon(std::move(uvPoly));
+        if (uvPoly.size() < 3) continue;
+
+        std::vector<std::pair<Int32,Int32>> corners;
+        corners.reserve(uvPoly.size());
+        for (const auto& uv : uvPoly)
+            corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
+        ScanlineFill(corners, r, g, b, alpha);
     }
 
     // 2. Polygon outlines (per-object color, global thickness)
@@ -284,8 +291,14 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         auto [r, g, b] = to255(line.color);
         Float thick = settings.ScaleLineWidth(line.thickness, m_width);
 
-        bool capA = (pointConnections[ia] == 1);
-        bool capB = (pointConnections[ib] == 1);
+        // Caps: always draw round caps at endpoints (connection count == 1).
+        // For SPLINE segments, also draw caps at intermediate vertices
+        // (connection count == 2). Without this, the angle between two
+        // consecutive spline segments creates a gap on the outer side of a
+        // turn, making the spline look unevenly thick. Round caps fill those
+        // gaps and give a consistent thickness along the whole spline.
+        bool capA = (pointConnections[ia] == 1) || line.isSpline;
+        bool capB = (pointConnections[ib] == 1) || line.isSpline;
 
         DrawThickLine(UtoX(u0), VtoY(1.0 - v0),
                        UtoX(u1), VtoY(1.0 - v1),

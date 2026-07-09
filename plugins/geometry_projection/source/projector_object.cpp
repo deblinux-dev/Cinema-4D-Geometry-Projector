@@ -278,7 +278,7 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
     {
         GeometryCollector collector;
         collector.Collect(srcObjs, doc, settings.splineSubdivision,
-                      settings.fgColor, settings.lineWidth);
+                      settings.fgColor, settings.lineWidth, settings.drawFill);
         cache->geometry           = collector.GetGeometry();
         cache->geometryValid      = true;
         cache->projectionValid    = false;
@@ -472,7 +472,7 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
 
     GeometryCollector collector;
     collector.Collect(srcObjs, doc, settings.splineSubdivision,
-                      settings.fgColor, settings.lineWidth);
+                      settings.fgColor, settings.lineWidth, settings.drawFill);
 
     GeometryProjector projector;
     ProjectedGeometry projected;
