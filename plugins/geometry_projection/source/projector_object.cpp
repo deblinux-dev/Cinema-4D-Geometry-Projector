@@ -156,27 +156,26 @@ Bool GeometryProjectorObject::CopyTo(NodeData* dest, GeListNode* snode, GeListNo
     return SUPER::CopyTo(dest, snode, dnode, flags, trn);
 }
 
-// ==================== CheckDirty ====================
+// ==================== GetVirtualObjects ====================
 
-// C4D only calls GetVirtualObjects() when this object is dirty. Source objects
-// live in an InExclude list (they are NOT children), so C4D has no automatic
-// dependency tracking for them. CheckDirty() is polled by C4D on the main
-// thread; by comparing the combined dirty checksum of all source objects (and
-// the camera in camera mode) against the last seen value, we can detect their
-// transforms/edits and mark this generator dirty, which triggers
-// GetVirtualObjects() -> DoUpdate() -> bitmap rebuild -> material refresh.
-void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
+BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, HierarchyHelp* hh)
 {
+    BaseDocument* doc = op->GetDocument();
+    if (!doc) return BaseObject::Alloc(Onull);
+
     BaseContainer* data = op->GetDataInstance();
-    if (!data || !doc) return;
+    if (!data) return BaseObject::Alloc(Onull);
 
-    // Sum the dirty counters of all dependencies. Use SEPARATE GetDirty() calls
-    // per flag (not a combined OR mask) because the combined-mask return value
-    // can collide between different objects/changes, which caused only the first
-    // source object's edits to be detected. GetDirty() returns a counter that
-    // only increases, so summing per-flag per-object gives a unique checksum.
-    UInt32 sum = 0;
+    // Official dependency tracking via AddDependence(): C4D monitors every
+    // object we add to the list and automatically re-invokes GetVirtualObjects
+    // when ANY of them changes (move/rotate/scale/param edit). This is the
+    // correct mechanism for generators that depend on non-child objects
+    // (InExclude list, linked target, linked camera). It replaces the fragile
+    // CheckDirty + IsDirty checksum hacks which only reliably tracked the
+    // first source object and could desync after add/remove/reorder.
+    op->NewDependenceList();
 
+    // Source objects (geometry to project)
     InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
     if (srcList)
     {
@@ -185,26 +184,16 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
         {
             BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
             if (srcObj)
-            {
-                sum += srcObj->GetDirty(DIRTYFLAGS::MATRIX);
-                sum += srcObj->GetDirty(DIRTYFLAGS::DATA);
-                sum += srcObj->GetDirty(DIRTYFLAGS::CACHE);
-            }
+                op->AddDependence(hh, srcObj, DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
         }
     }
 
-    BaseMaterial* mat = static_cast<BaseMaterial*>(data->GetLink(TARGET_MATERIAL, doc, Mmaterial));
-    if (mat)
-        sum += mat->GetDirty(DIRTYFLAGS::DATA);
-
+    // Target object (its world bounds drive the UV layout)
     BaseObject* tgtObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
     if (tgtObj)
-    {
-        sum += tgtObj->GetDirty(DIRTYFLAGS::MATRIX);
-        sum += tgtObj->GetDirty(DIRTYFLAGS::DATA);
-        sum += tgtObj->GetDirty(DIRTYFLAGS::CACHE);
-    }
+        op->AddDependence(hh, tgtObj, DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
 
+    // Camera in camera mode (explicit link OR editor camera)
     if (data->GetInt32(PROJ_MODE, PROJ_MODE_FLAT_Z) == PROJ_MODE_CAMERA)
     {
         BaseObject* cam = static_cast<BaseObject*>(data->GetLink(PROJ_CAMERA_LINK, doc, Ocamera));
@@ -218,83 +207,11 @@ void GeometryProjectorObject::CheckDirty(BaseObject* op, BaseDocument* doc)
             }
         }
         if (cam)
-        {
-            sum += cam->GetDirty(DIRTYFLAGS::MATRIX);
-            sum += cam->GetDirty(DIRTYFLAGS::DATA);
-        }
+            op->AddDependence(hh, cam, DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA);
     }
 
-    // Compare against the class field. On viewport clones this field resets
-    // to 0, so the first CheckDirty always sees a difference and forces a
-    // rebuild -- this is what drives the real-time viewport update.
-    if (sum != m_lastDependencyDirty)
-    {
-        m_lastDependencyDirty = sum;
-        op->SetDirty(DIRTYFLAGS::DATA);
-    }
-}
-
-// ==================== GetVirtualObjects ====================
-
-BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, HierarchyHelp* hh)
-{
-    BaseDocument* doc = op->GetDocument();
-    if (!doc) return BaseObject::Alloc(Onull);
-
-    BaseContainer* data = op->GetDataInstance();
-    if (!data) return BaseObject::Alloc(Onull);
-
-    // This IsDirty() loop on the source/target/camera objects is the PRIMARY
-    // real-time driver. C4D marks these objects dirty when the user moves/
-    // edits them, and querying IsDirty() here (which C4D routes through the
-    // generator's evaluation) makes GetVirtualObjects fire and rebuild the
-    // bitmap. Without this loop (removed in a previous commit) real-time
-    // updates stopped entirely, even for a single cube.
-    //
-    // We iterate ALL source objects (no early break) so that an edit to ANY
-    // of them is detected -- previously the '&& !dirty' early-exit could miss
-    // later objects in some evaluation orders.
-    Bool dirty = op->IsDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::MATRIX | DIRTYFLAGS::CACHE);
-
-    if (!dirty)
-    {
-        InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
-        if (srcList)
-        {
-            Int32 cnt = srcList->GetObjectCount();
-            for (Int32 i = 0; i < cnt; i++)
-            {
-                BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
-                if (srcObj && srcObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
-                    dirty = true;
-            }
-        }
-    }
-
-    // Target object (its bounds drive the UV layout)
-    if (!dirty)
-    {
-        BaseObject* tgtObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
-        if (tgtObj && tgtObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
-            dirty = true;
-    }
-
-    // Camera in camera mode
-    if (!dirty && data->GetInt32(PROJ_MODE, PROJ_MODE_FLAT_Z) == PROJ_MODE_CAMERA)
-    {
-        BaseObject* cam = static_cast<BaseObject*>(data->GetLink(PROJ_CAMERA_LINK, doc, Ocamera));
-        if (!cam)
-        {
-            BaseDraw* bd = doc->GetActiveBaseDraw();
-            if (bd)
-            {
-                cam = bd->GetSceneCamera(doc);
-                if (!cam) cam = bd->GetEditorCamera();
-            }
-        }
-        if (cam && cam->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA))
-            dirty = true;
-    }
+    // CompareDependenceList returns true if NOTHING changed since last eval.
+    Bool dirty = !op->CompareDependenceList();
 
     ProjectionCache* cache = GetCache(op);
 
@@ -328,17 +245,32 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
     ProjectionCache* cache = GetCache(op);
     if (!cache) return;
 
-    std::map<Int64, ObjectDirtyState> currentStates;
-    for (BaseObject* obj : srcObjs)
-    {
-        if (obj)
-            currentStates[(Int64)(intptr_t)obj] = GetObjectDirtyState(obj);
-    }
-
+    // With the AddDependence() list in GetVirtualObjects, C4D only calls
+    // DoUpdate when something actually changed (a source/target/camera object
+    // moved, or projection/raster settings changed). So we can simplify: if
+    // the projection settings hash changed, re-project; if the raster hash
+    // changed, re-rasterize. We dropped the objectDirtyStates map (which keyed
+    // on object pointers and could desync after add/remove/reorder, causing
+    // the plugin to 'break' and stop reacting until the projector was rebuilt).
     UInt32 projHash   = ComputeProjectionHash(settings);
     UInt32 rasterHash = ComputeRasterHash(settings);
 
-    CacheUpdateLevel level = cache->GetUpdateLevel(currentStates, projHash, rasterHash, previewRes);
+    // Determine the cheapest update level that satisfies all changes.
+    // If the projection hash changed we must re-project (and re-rasterize).
+    // If only the raster hash changed we can skip re-projection.
+    // If neither changed but the cache is invalid (first run / object added or
+    // removed -> AddDependence fired) we do a full rebuild.
+    CacheUpdateLevel level;
+    if (!cache->geometryValid)
+        level = CacheUpdateLevel::GEOMETRY;
+    else if (projHash != cache->projectionHash)
+        level = CacheUpdateLevel::PROJECTION;
+    else if (rasterHash != cache->rasterHash || previewRes != cache->bitmapWidth)
+        level = CacheUpdateLevel::RASTER;
+    else
+        // A dependency fired (object moved) but settings are unchanged -- the
+        // GEOMETRY itself changed, so we must re-collect and re-project.
+        level = CacheUpdateLevel::GEOMETRY;
 
     if (level == CacheUpdateLevel::NONE) return;
 
@@ -348,7 +280,6 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
         collector.Collect(srcObjs, doc, settings.splineSubdivision,
                       settings.fgColor, settings.lineWidth);
         cache->geometry           = collector.GetGeometry();
-        cache->objectDirtyStates  = currentStates;
         cache->geometryValid      = true;
         cache->projectionValid    = false;
         cache->rasterValid        = false;
