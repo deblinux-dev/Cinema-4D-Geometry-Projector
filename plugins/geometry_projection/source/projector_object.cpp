@@ -241,14 +241,60 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
     BaseDocument* doc = op->GetDocument();
     if (!doc) return BaseObject::Alloc(Onull);
 
-    // CheckDirty() tracks all external dependencies (source objects, target
-    // object, camera) and calls op->SetDirty(DATA) when any of them change.
-    // Here we just check if this object is dirty -- if so, rebuild the cache.
-    // (We deliberately do NOT call IsDirty() on the source objects here, as
-    // that resets their dirty flags and can interfere with CheckDirty's
-    // GetDirty()-based checksum tracking, which previously caused only the
-    // first source object's edits to be detected.)
+    BaseContainer* data = op->GetDataInstance();
+    if (!data) return BaseObject::Alloc(Onull);
+
+    // This IsDirty() loop on the source/target/camera objects is the PRIMARY
+    // real-time driver. C4D marks these objects dirty when the user moves/
+    // edits them, and querying IsDirty() here (which C4D routes through the
+    // generator's evaluation) makes GetVirtualObjects fire and rebuild the
+    // bitmap. Without this loop (removed in a previous commit) real-time
+    // updates stopped entirely, even for a single cube.
+    //
+    // We iterate ALL source objects (no early break) so that an edit to ANY
+    // of them is detected -- previously the '&& !dirty' early-exit could miss
+    // later objects in some evaluation orders.
     Bool dirty = op->IsDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::MATRIX | DIRTYFLAGS::CACHE);
+
+    if (!dirty)
+    {
+        InExcludeData* srcList = (InExcludeData*)data->GetCustomDataType(SOURCE_OBJECTS, CUSTOMDATATYPE_INEXCLUDE_LIST);
+        if (srcList)
+        {
+            Int32 cnt = srcList->GetObjectCount();
+            for (Int32 i = 0; i < cnt; i++)
+            {
+                BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
+                if (srcObj && srcObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
+                    dirty = true;
+            }
+        }
+    }
+
+    // Target object (its bounds drive the UV layout)
+    if (!dirty)
+    {
+        BaseObject* tgtObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
+        if (tgtObj && tgtObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
+            dirty = true;
+    }
+
+    // Camera in camera mode
+    if (!dirty && data->GetInt32(PROJ_MODE, PROJ_MODE_FLAT_Z) == PROJ_MODE_CAMERA)
+    {
+        BaseObject* cam = static_cast<BaseObject*>(data->GetLink(PROJ_CAMERA_LINK, doc, Ocamera));
+        if (!cam)
+        {
+            BaseDraw* bd = doc->GetActiveBaseDraw();
+            if (bd)
+            {
+                cam = bd->GetSceneCamera(doc);
+                if (!cam) cam = bd->GetEditorCamera();
+            }
+        }
+        if (cam && cam->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA))
+            dirty = true;
+    }
 
     ProjectionCache* cache = GetCache(op);
 
