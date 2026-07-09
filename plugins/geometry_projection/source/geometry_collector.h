@@ -59,8 +59,10 @@ public:
     // defaultColor    -- color to use when an object has no ProjectionSettingsTag
     //                     with color override
     // defaultThickness -- line thickness when no tag override
+    // defaultFill     -- global Draw Fill setting (used when no tag override)
     void Collect(const std::vector<BaseObject*>& objects, BaseDocument* doc,
-                 Int32 splineSubdiv, Vector defaultColor, Float defaultThickness);
+                 Int32 splineSubdiv, Vector defaultColor, Float defaultThickness,
+                 Bool defaultFill);
 
     const CollectedGeometry& GetGeometry() const { return m_geometry; }
     CollectedGeometry& GetGeometry() { return m_geometry; }
