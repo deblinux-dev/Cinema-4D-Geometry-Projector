@@ -344,7 +344,8 @@ static bool PointInAnyPoly(Float x, Float y,
 void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
 {
     // Nothing to do if no clip sources were recorded.
-    if (m_geometry.clipSources.empty()) return;
+    if (!m_geometry) return;
+    if (m_geometry->clipSources.empty()) return;
     if (proj.polygons.empty() && proj.lines.empty() && proj.closedSplines.empty()) return;
 
     // Process owners in dependency order: an owner whose clip sources include
@@ -352,7 +353,7 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
     // other owner's silhouette is finalized. We do a simple iterative
     // topological resolution: repeat until no changes.
     std::vector<BaseObject*> ownersWithClips;
-    for (const auto& kv : m_geometry.clipSources)
+    for (const auto& kv : m_geometry->clipSources)
         ownersWithClips.push_back(kv.first);
 
     // For each owner, build its clip silhouette and clip its own geometry.
@@ -366,11 +367,13 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
         for (BaseObject* owner : ownersWithClips)
         {
             if (done.count(owner)) continue;
-            const auto& clips = m_geometry.clipSources[owner];
+            auto it = m_geometry->clipSources.find(owner);
+            if (it == m_geometry->clipSources.end()) { done.insert(owner); continue; }
+            const std::vector<BaseObject*>& clips = it->second;
             // Check all clip sources are either clip-free or already done.
             bool ready = true;
             for (BaseObject* c : clips)
-                if (m_geometry.clipSources.count(c) && !done.count(c)) { ready = false; break; }
+                if (m_geometry->clipSources.count(c) && !done.count(c)) { ready = false; break; }
             if (!ready) continue;
 
             // Build combined silhouette of clip sources (from current proj state,
