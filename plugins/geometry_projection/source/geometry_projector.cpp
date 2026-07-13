@@ -2,6 +2,8 @@
 
 #include "geometry_projector.h"
 #include "description/Ogeometryprojector.h"
+#include "c4d_basetag.h"
+#include "c4d_libs/lib_collider.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -56,6 +58,7 @@ ProjectionSettings ProjectionSettings::FromContainer(BaseContainer* bc, Int32 re
 
     s.cameraMatrix.SetIdentity();
     s.cameraFov = 1.0;
+    s.targetSurfaceObj = targetObj;
 
     if (s.projMode == PROJ_MODE_CAMERA && doc)
     {
@@ -159,6 +162,50 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
 
     std::vector<std::pair<Float,Float>> pts2d;
     pts2d.reserve(ptCount);
+
+    // UV-follow mode: ray-cast each point against the target surface and
+    // sample UV at the hit. This completely replaces the flat projection
+    // math (no normalize/autofit/transform -- the UV comes directly from
+    // the target's UVW tag).
+    if (settings.projMode == PROJ_MODE_UVFOLLOW)
+    {
+        // Lazy-init the ray collider + UVW tag once per Project() call.
+        if (!m_uvFollowReady)
+        {
+            m_uvFollowReady = InitUVFollow(settings);
+            if (!m_uvFollowReady)
+            {
+                // No valid target surface -- leave points2d empty so the
+                // rasterizer/shader shows the checkerboard fallback.
+                return;
+            }
+        }
+
+        pts2d.reserve(ptCount);
+        for (Int32 i = 0; i < ptCount; i++)
+            pts2d.push_back(ProjectUVFollow(geometry.points[i], settings));
+
+        // Skip normalize/autofit/transform -- UV is already in [0..1].
+        outProjected.boundsMinX = 0.0; outProjected.boundsMinY = 0.0;
+        outProjected.boundsMaxX = 1.0; outProjected.boundsMaxY = 1.0;
+        outProjected.points2d    = std::move(pts2d);
+        outProjected.lines       = geometry.lines;
+        outProjected.polygons    = geometry.polygons;
+        outProjected.closedSplines = geometry.closed_splines;
+        ApplyClipping(outProjected);
+
+        // Free the ray collider (allocated per Project() call). The UVWTag
+        // pointer is not owned (it belongs to the target object).
+        if (m_rayCollider)
+        {
+            GeRayCollider* rc = static_cast<GeRayCollider*>(m_rayCollider);
+            GeRayCollider::Free(rc);
+            m_rayCollider = nullptr;
+        }
+        m_uvwTag = nullptr;
+        m_uvFollowReady = false;
+        return;
+    }
 
     for (Int32 i = 0; i < ptCount; i++)
         pts2d.push_back(ProjectPoint(geometry.points[i], settings));
@@ -483,6 +530,153 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
     }
 }
 
+// ==================== UV Follow ====================
+
+Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings)
+{
+    // Clean up any previous state (in case Project() is called twice).
+    if (m_rayCollider)
+    {
+        GeRayCollider* rc = static_cast<GeRayCollider*>(m_rayCollider);
+        GeRayCollider::Free(rc);
+        m_rayCollider = nullptr;
+    }
+    m_uvwTag      = nullptr;
+    m_uvFollowReady = false;
+
+    if (!settings.targetSurfaceObj) return false;
+
+    // UV-follow needs a polygon object with a UVW tag. If the target is a
+    // generator (e.g. a parametric Sphere), walk its cache to find the
+    // generated PolygonObject.
+    BaseObject* surfObj = settings.targetSurfaceObj;
+    if (!surfObj->IsInstanceOf(Opolygon))
+    {
+        BaseObject* cache = surfObj->GetCache();
+        while (cache && !cache->IsInstanceOf(Opolygon))
+            cache = cache->GetCache();
+        if (!cache)
+        {
+            // Try direct children as a last resort.
+            cache = surfObj->GetDown();
+            while (cache && !cache->IsInstanceOf(Opolygon))
+                cache = cache->GetNext();
+        }
+        if (cache) surfObj = cache;
+        else return false;
+    }
+    if (!surfObj->IsInstanceOf(Opolygon)) return false;
+
+    // Find the UVW tag (any Tuvw on the object).
+    BaseTag* tag = surfObj->GetTag(Tuvw);
+    if (!tag) return false;
+    m_uvwTag = tag;
+
+    // Build the ray collider. force=true so it picks up deformations/edits.
+    GeRayCollider* rc = GeRayCollider::Alloc();
+    if (!rc) return false;
+    if (!rc->Init(surfObj, true))
+    {
+        GeRayCollider::Free(rc);
+        return false;
+    }
+    m_rayCollider = rc;
+
+    // Cache the target's inverse world matrix (to transform world-space points
+    // into the target's local space where polygons live) and the target center
+    // (ray direction = from point toward center).
+    Matrix mg = surfObj->GetMg();
+    m_targetInvMg = ~mg;
+    m_targetCenter = mg * surfObj->GetMp();
+
+    m_uvFollowReady = true;
+    return true;
+}
+
+std::pair<Float,Float> GeometryProjector::ProjectUVFollow(const Vector& pt,
+                                                            const ProjectionSettings& settings)
+{
+    if (!m_uvFollowReady || !m_rayCollider || !m_uvwTag) return {0.0, 0.0};
+
+    GeRayCollider* rc = static_cast<GeRayCollider*>(m_rayCollider);
+    UVWTag* uvwTag = static_cast<UVWTag*>(m_uvwTag);
+
+    // Ray from the world-space point toward the target center. Transform both
+    // into the target's local space for GeRayCollider (which works in object
+    // coordinates).
+    Vector localP = m_targetInvMg * pt;
+    Vector localC = m_targetInvMg * m_targetCenter;
+    Vector dir = localC - localP;
+    Float  len = dir.GetLength();
+    if (len < 1e-7) return {0.0, 0.0};
+    dir = dir / len;
+    // Use a generous ray length so we hit even if the point is far from target.
+    Float rayLen = len * 2.0 + 1000.0;
+
+    if (!rc->Intersect(localP, dir, rayLen, false))
+    {
+        // No hit -- ray went past the target. Fall back to "shape cast":
+        // find the closest point on the target surface by sampling the nearest
+        // polygon vertex (a cheap approximation; full closest-point-on-mesh
+        // would need a BVH which is overkill here). We pick the polygon whose
+        // centroid is nearest to localP and sample its UV at the centroid.
+        PolygonObject* polyObj = static_cast<PolygonObject*>(uvwTag->GetObject());
+        if (!polyObj) return {0.0, 0.0};
+        const Vector*   pts  = polyObj->GetPointR();
+        const CPolygon* polys = polyObj->GetPolygonR();
+        Int32 polyCount = polyObj->GetPolygonCount();
+        if (!pts || !polys || polyCount <= 0) return {0.0, 0.0};
+
+        Float bestDist = std::numeric_limits<Float>::max();
+        Int32 bestPoly = 0;
+        for (Int32 i = 0; i < polyCount; i++)
+        {
+            const CPolygon& p = polys[i];
+            Vector c = (pts[p.a] + pts[p.b] + pts[p.c]) * (1.0 / 3.0);
+            if (p.c != p.d) c = (pts[p.a] + pts[p.b] + pts[p.c] + pts[p.d]) * 0.25;
+            Float d = (c - localP).GetLength();
+            if (d < bestDist) { bestDist = d; bestPoly = i; }
+        }
+        UVWStruct us = uvwTag->GetSlow(bestPoly);
+        // Sample at the polygon centroid (average of a/b/c).
+        return { (us.a.x + us.b.x + us.c.x) / 3.0,
+                 (us.a.y + us.b.y + us.c.y) / 3.0 };
+    }
+
+    // Use the nearest intersection (closest to the ray origin = closest to
+    // the source point, i.e. the side of the target the source is on).
+    GeRayColResult res;
+    if (!rc->GetNearestIntersection(&res)) return {0.0, 0.0};
+
+    // Sample UV at the hit using barycentric coordinates.
+    // res.barrycoords: x=u, y=v, z=d (distance along tri). The polygon is split
+    // into two triangles; tri_face_id tells us which half. For a triangle
+    // (a,b,c): uv = a_uv + u*(b_uv-a_uv) + v*(c_uv-a_uv).
+    Int32 polyId = res.face_id;
+    if (polyId < 0) return {0.0, 0.0};
+
+    UVWStruct us = uvwTag->GetSlow(polyId);
+    Float u = res.barrycoords.x;
+    Float v = res.barrycoords.y;
+
+    // tri_face_id > 0 means first half (a,b,c); < 0 means second half (a,c,d)
+    // for a quad. For a triangle it's always the first half.
+    Bool secondHalf = (res.tri_face_id < 0);
+
+    Vector uvw;
+    if (!secondHalf)
+    {
+        // triangle a,b,c
+        uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
+    }
+    else
+    {
+        // triangle a,c,d (second half of the quad)
+        uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
+    }
+    return { uvw.x, uvw.y };
+}
+
 std::pair<Float,Float> GeometryProjector::ProjectPoint(const Vector& pt,
                                                          const ProjectionSettings& settings)
 {
@@ -498,9 +692,8 @@ std::pair<Float,Float> GeometryProjector::ProjectPoint(const Vector& pt,
         case PROJ_MODE_FLAT_NEG_Z: return {-pt.x, pt.y};
         case PROJ_MODE_CAMERA:     return ProjectCamera(pt, settings);
         case PROJ_MODE_CUSTOM:     return ProjectCustom(pt, settings);
-        // UVFOLLOW is handled per-point in Project() via the target's surface
-        // UV; ProjectPoint is not used for that mode (points are mapped
-        // directly through GeRayCollider hits).
+        // UVFOLLOW is handled in Project() before reaching ProjectPoint;
+        // this is a safe fallback.
         case PROJ_MODE_UVFOLLOW:   return {pt.x, pt.y};
         default:                   return {pt.x, pt.y};
     }

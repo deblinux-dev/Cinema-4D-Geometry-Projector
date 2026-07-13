@@ -25,6 +25,11 @@ struct ProjectionSettings
     Vector targetBoundsRad;    // Target object bounding box half-extents
     Bool   hasTargetBounds;    // Whether to use target bounds for normalization
 
+    // UV-follow mode: the polygon object whose surface UV is sampled at the
+    // ray-hit point. Required for PROJ_MODE_UVFOLLOW; if null, UV-follow
+    // produces no output (shader falls back to checkerboard).
+    BaseObject* targetSurfaceObj = nullptr;
+
     // UV transform
     Float  uvOffsetX;
     Float  uvOffsetY;
@@ -126,9 +131,24 @@ private:
     // the clipSources map). Set at the start of Project().
     const CollectedGeometry* m_geometry = nullptr;
 
+    // UV-follow cached state (initialized once per Project() call when the
+    // mode is UVFOLLOW). Avoids re-creating the GeRayCollider and re-fetching
+    // the UVWTag for every point.
+    void* m_rayCollider = nullptr;   // GeRayCollider* (opaque to header)
+    void* m_uvwTag      = nullptr;   // UVWTag* (opaque to header)
+    Matrix m_targetInvMg;            // target world matrix inverse
+    Vector m_targetCenter;           // target bounds center (world)
+    Bool   m_uvFollowReady = false;
+
     std::pair<Float,Float> ProjectPoint(const Vector& pt, const ProjectionSettings& settings);
     std::pair<Float,Float> ProjectCamera(const Vector& pt, const ProjectionSettings& settings);
     std::pair<Float,Float> ProjectCustom(const Vector& pt, const ProjectionSettings& settings);
+    // UV-follow: ray-cast from pt toward target center, sample UV at hit.
+    // rayCollider / uvwTag / targetInvMg are cached per-Project() call.
+    std::pair<Float,Float> ProjectUVFollow(const Vector& pt, const ProjectionSettings& settings);
+    // Initialize the ray collider + UVW tag + target inverse matrix for a
+    // UV-follow pass. Returns false if no valid polygon target is available.
+    Bool InitUVFollow(const ProjectionSettings& settings);
 
     void GetTargetUVBounds(const ProjectionSettings& settings,
                             Float& outMinX, Float& outMinY,
