@@ -3,6 +3,7 @@
 #include "geometry_collector.h"
 #include "projection_tag.h"
 #include "description/Tprojectionsettings.h"
+#include "customgui_inexclude.h"
 #include <cmath>
 
 void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
@@ -37,6 +38,7 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     m_currentThickness = m_defaultThickness;
     m_currentFillOverride = false;
     m_currentFill        = m_defaultFill;
+    m_currentOwner       = obj;
 
     BaseTag* tag = obj->GetTag(PLUGIN_ID_PROJECTION_TAG);
     if (tag)
@@ -52,6 +54,25 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
             {
                 m_currentFillOverride = true;
                 m_currentFill        = td->GetBool(PROJTAG_FILL, m_defaultFill);
+            }
+
+            // Read the clip-source InExclude list. Each listed object's
+            // projected silhouette will clip this object during the projection
+            // pass. Nesting is automatic: a clip source can itself have a
+            // PROJTAG_CLIP_SOURCES list, so its silhouette is already clipped.
+            InExcludeData* clipList = (InExcludeData*)td->GetCustomDataType(PROJTAG_CLIP_SOURCES, CUSTOMDATATYPE_INEXCLUDE_LIST);
+            if (clipList && clipList->GetObjectCount() > 0 && doc)
+            {
+                std::vector<BaseObject*> clips;
+                Int32 cnt = clipList->GetObjectCount();
+                clips.reserve(cnt);
+                for (Int32 i = 0; i < cnt; i++)
+                {
+                    BaseObject* clipObj = static_cast<BaseObject*>(clipList->ObjectFromIndex(doc, i));
+                    if (clipObj) clips.push_back(clipObj);
+                }
+                if (!clips.empty())
+                    m_geometry.clipSources[obj] = std::move(clips);
             }
         }
     }
@@ -201,16 +222,16 @@ void GeometryCollector::CollectPolygonObject(PolygonObject* polyObj, const Matri
         bool isTriangle = (poly.c == poly.d);
 
         if (isTriangle)
-            m_geometry.polygons.push_back({ {a, b, c}, m_currentColor, m_currentFillOverride, m_currentFill });
+            m_geometry.polygons.push_back({ {a, b, c}, m_currentColor, m_currentFillOverride, m_currentFill, m_currentOwner });
         else
-            m_geometry.polygons.push_back({ {a, b, c, d}, m_currentColor, m_currentFillOverride, m_currentFill });
+            m_geometry.polygons.push_back({ {a, b, c, d}, m_currentColor, m_currentFillOverride, m_currentFill, m_currentOwner });
 
         auto addEdge = [&](Int32 p0, Int32 p1)
         {
             std::pair<Int32,Int32> edge = (p0 < p1) ? std::make_pair(p0, p1)
                                                      : std::make_pair(p1, p0);
             if (edgeSet.insert(edge).second)
-                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness, false });
+                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness, false, m_currentOwner });
         };
 
         addEdge(a, b);
@@ -288,11 +309,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
 
             for (Int32 i = 0; i < segPointCount - 1; i++)
                 m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
-                                             m_currentColor, m_currentThickness, true });
+                                             m_currentColor, m_currentThickness, true, m_currentOwner });
 
             if (closed)
                 m_geometry.lines.push_back({ baseIdx + segPointCount - 1, baseIdx,
-                                             m_currentColor, m_currentThickness, true });
+                                             m_currentColor, m_currentThickness, true, m_currentOwner });
         }
         else
         {
@@ -308,11 +329,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
 
             for (Int32 i = 0; i < totalSamples - 1; i++)
                 m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
-                                             m_currentColor, m_currentThickness, true });
+                                             m_currentColor, m_currentThickness, true, m_currentOwner });
 
             if (closed)
                 m_geometry.lines.push_back({ baseIdx + totalSamples - 1, baseIdx,
-                                             m_currentColor, m_currentThickness, true });
+                                             m_currentColor, m_currentThickness, true, m_currentOwner });
         }
 
         if (closed)
@@ -322,7 +343,7 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
             splinePoly.reserve(addedCount);
             for (Int32 i = 0; i < addedCount; i++)
                 splinePoly.push_back(baseIdx + i);
-            m_geometry.closed_splines.push_back({ std::move(splinePoly), m_currentColor, m_currentFillOverride, m_currentFill });
+            m_geometry.closed_splines.push_back({ std::move(splinePoly), m_currentColor, m_currentFillOverride, m_currentFill, m_currentOwner });
         }
 
         startPt += segPointCount;

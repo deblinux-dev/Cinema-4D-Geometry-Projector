@@ -7,4 +7,5 @@ STRINGTABLE Tprojectionsettings
     PROJTAG_THICKNESS "Thickness";
     PROJTAG_OVERRIDE_FILL "Override Fill Polygons";
     PROJTAG_FILL "Fill Polygons";
+    PROJTAG_CLIP_SOURCES "Clip Boundaries (silhouette clips this object)";
 }

@@ -240,7 +240,7 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
     // on a 10x10 plane occupies 0.1x0.1 of UV. Previously this used srcObjs[0]
     // (the cube itself), which made the cube stretch to fill the whole UV.
     BaseObject* targetObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
-    ProjectionSettings settings = ProjectionSettings::FromContainer(data, previewRes, targetObj, doc);
+    ProjectionSettings settings = ProjectionSettings::FromContainer(data, previewRes, targetObj, doc, srcObjs);
 
     ProjectionCache* cache = GetCache(op);
     if (!cache) return;
@@ -466,8 +466,8 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
     if (bakeAA == BAKE_AA_2X) { renderW *= 2; renderH *= 2; }
     if (bakeAA == BAKE_AA_4X) { renderW *= 4; renderH *= 4; }
 
-    BaseObject* targetObj = srcObjs[0];
-    ProjectionSettings settings = ProjectionSettings::FromContainer(data, renderW, targetObj, doc);
+    BaseObject* targetObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
+    ProjectionSettings settings = ProjectionSettings::FromContainer(data, renderW, targetObj, doc, srcObjs);
     settings.previewResolution = renderW;
 
     GeometryCollector collector;

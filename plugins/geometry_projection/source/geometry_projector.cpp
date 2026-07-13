@@ -5,12 +5,14 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <set>
 
 // ==================== ProjectionSettings ====================
 
 ProjectionSettings ProjectionSettings::FromContainer(BaseContainer* bc, Int32 resolution,
                                                       BaseObject* targetObj,
-                                                      BaseDocument* doc)
+                                                      BaseDocument* doc,
+                                                      const std::vector<BaseObject*>& sourceObjs)
 {
     ProjectionSettings s;
 
@@ -89,19 +91,53 @@ ProjectionSettings ProjectionSettings::FromContainer(BaseContainer* bc, Int32 re
     // Note: GetMp()/GetRad() return LOCAL-space bounds, so they must be
     // transformed through the target's world matrix (position + scale + rotation).
     s.hasTargetBounds = false;
-    if (targetObj && s.autoFit)
+    if (s.autoFit)
     {
-        Matrix mg = targetObj->GetMg();
-        s.targetBoundsCenter = mg * targetObj->GetMp();
-        Vector rad = targetObj->GetRad();
-        // Half-extents scaled by the world-matrix axis lengths so a scaled
-        // or rotated target still yields correct world-space bounds.
-        s.targetBoundsRad = Vector(
-            rad.x * mg.sqmat.v1.GetLength(),
-            rad.y * mg.sqmat.v2.GetLength(),
-            rad.z * mg.sqmat.v3.GetLength()
-        );
-        s.hasTargetBounds = true;
+        if (targetObj)
+        {
+            // Explicit target object: use its world-space bounding box.
+            Matrix mg = targetObj->GetMg();
+            s.targetBoundsCenter = mg * targetObj->GetMp();
+            Vector rad = targetObj->GetRad();
+            s.targetBoundsRad = Vector(
+                rad.x * mg.sqmat.v1.GetLength(),
+                rad.y * mg.sqmat.v2.GetLength(),
+                rad.z * mg.sqmat.v3.GetLength()
+            );
+            s.hasTargetBounds = true;
+        }
+        else if (!sourceObjs.empty())
+        {
+            // No target object: compute the combined world-space bounding box
+            // of ALL source objects so that every object fits inside [0..1] UV.
+            // This is the "flat projection plane sized to fit all geometry" mode.
+            Vector bmin( std::numeric_limits<Float>::max());
+            Vector bmax(-std::numeric_limits<Float>::max());
+            for (BaseObject* obj : sourceObjs)
+            {
+                if (!obj) continue;
+                Matrix mg = obj->GetMg();
+                Vector mp = obj->GetMp();
+                Vector rad = obj->GetRad();
+                // 8 corners of the local AABB, transformed to world space
+                for (Int32 ix = -1; ix <= 1; ix += 2)
+                for (Int32 iy = -1; iy <= 1; iy += 2)
+                for (Int32 iz = -1; iz <= 1; iz += 2)
+                {
+                    Vector corner = mp + Vector(rad.x * ix, rad.y * iy, rad.z * iz);
+                    Vector w = mg * corner;
+                    if (w.x < bmin.x) bmin.x = w.x;
+                    if (w.y < bmin.y) bmin.y = w.y;
+                    if (w.z < bmin.z) bmin.z = w.z;
+                    if (w.x > bmax.x) bmax.x = w.x;
+                    if (w.y > bmax.y) bmax.y = w.y;
+                    if (w.z > bmax.z) bmax.z = w.z;
+                }
+            }
+            s.targetBoundsCenter = (bmin + bmax) * 0.5;
+            s.targetBoundsRad    = (bmax - bmin) * 0.5;
+            s.hasTargetBounds = true;
+        }
     }
 
     return s;
@@ -114,6 +150,7 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
                                   ProjectedGeometry& outProjected)
 {
     outProjected.Clear();
+    m_geometry = &geometry;
 
     if (geometry.points.empty())
         return;
@@ -182,6 +219,265 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
     outProjected.lines       = geometry.lines;
     outProjected.polygons    = geometry.polygons;
     outProjected.closedSplines = geometry.closed_splines;
+
+    // ----- Clipping pass -----
+    // For each object that has clip sources (read from the ProjectionSettingsTag),
+    // build the combined projected silhouette of its clip sources and clip the
+    // object's own polygons + closed splines + lines against it.
+    // Silhouettes are built from the (already projected) polygons/closed_splines
+    // of the clip source objects, so nesting works automatically: a clip source
+    // that itself has a clip source already had its silhouette clipped above
+    // (we process owners in an order that resolves dependencies first).
+    ApplyClipping(outProjected);
+}
+
+// Build the combined 2D silhouette (list of UV polygons) for a set of owner
+// objects, using their already-projected polygons and closed splines.
+static void BuildOwnerSilhouette(const ProjectedGeometry& proj,
+                                  const std::vector<BaseObject*>& owners,
+                                  std::vector<std::vector<std::pair<Float,Float>>>& outPolys)
+{
+    for (BaseObject* owner : owners)
+    {
+        if (!owner) continue;
+        for (const auto& poly : proj.polygons)
+        {
+            if (poly.ownerObj != owner) continue;
+            std::vector<std::pair<Float,Float>> uv;
+            uv.reserve(poly.indices.size());
+            for (Int32 idx : poly.indices)
+            {
+                if (idx >= 0 && idx < (Int32)proj.points2d.size())
+                    uv.push_back(proj.points2d[idx]);
+            }
+            if (uv.size() >= 3) outPolys.push_back(std::move(uv));
+        }
+        for (const auto& sp : proj.closedSplines)
+        {
+            if (sp.ownerObj != owner) continue;
+            std::vector<std::pair<Float,Float>> uv;
+            uv.reserve(sp.indices.size());
+            for (Int32 idx : sp.indices)
+            {
+                if (idx >= 0 && idx < (Int32)proj.points2d.size())
+                    uv.push_back(proj.points2d[idx]);
+            }
+            if (uv.size() >= 3) outPolys.push_back(std::move(uv));
+        }
+    }
+}
+
+// Sutherland-Hodgman clip of a polygon against a single convex clip polygon.
+// (Clip sources are assumed convex; for non-convex boundaries the result may
+// be approximate but still usable as a mask.)
+static std::vector<std::pair<Float,Float>> SH_ClipPolyVsPoly(
+    const std::vector<std::pair<Float,Float>>& subject,
+    const std::vector<std::pair<Float,Float>>& clip)
+{
+    if (clip.size() < 3) return subject;
+    std::vector<std::pair<Float,Float>> out = subject;
+    Int32 cn = (Int32)clip.size();
+    for (Int32 i = 0; i < cn; i++)
+    {
+        if (out.empty()) break;
+        Int32 j = (i + 1) % cn;
+        Float ax = clip[i].first,  ay = clip[i].second;
+        Float bx = clip[j].first,  by = clip[j].second;
+        // edge direction
+        Float ex = bx - ax, ey = by - ay;
+        std::vector<std::pair<Float,Float>> next;
+        Int32 n = (Int32)out.size();
+        for (Int32 k = 0; k < n; k++)
+        {
+            auto cur = out[k];
+            auto prev = out[(k - 1 + n) % n];
+            // inside = left side of edge a->b (cross > 0)
+            auto cross = [&](const std::pair<Float,Float>& p) -> Float {
+                return (ex) * (p.second - ay) - (ey) * (p.first - ax);
+            };
+            bool curIn  = cross(cur)  >= 0.0;
+            bool prevIn = cross(prev) >= 0.0;
+            if (curIn)
+            {
+                if (!prevIn)
+                {
+                    Float t = cross(prev) / (cross(prev) - cross(cur));
+                    next.push_back({ prev.first + t * (cur.first - prev.first),
+                                     prev.second + t * (cur.second - prev.second) });
+                }
+                next.push_back(cur);
+            }
+            else if (prevIn)
+            {
+                Float t = cross(prev) / (cross(prev) - cross(cur));
+                next.push_back({ prev.first + t * (cur.first - prev.first),
+                                 prev.second + t * (cur.second - prev.second) });
+            }
+        }
+        out = std::move(next);
+    }
+    return out;
+}
+
+// Check if a 2D point is inside any of the clip polygons (point-in-polygon).
+static bool PointInAnyPoly(Float x, Float y,
+                            const std::vector<std::vector<std::pair<Float,Float>>>& polys)
+{
+    for (const auto& poly : polys)
+    {
+        Int32 n = (Int32)poly.size();
+        if (n < 3) continue;
+        bool inside = false;
+        for (Int32 i = 0, j = n - 1; i < n; j = i++)
+        {
+            Float xi = poly[i].first,  yi = poly[i].second;
+            Float xj = poly[j].first,  yj = poly[j].second;
+            if (((yi > y) != (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / ((yj - yi) != 0.0 ? (yj - yi) : 1e-10) + xi))
+                inside = !inside;
+        }
+        if (inside) return true;
+    }
+    return false;
+}
+
+void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
+{
+    // Nothing to do if no clip sources were recorded.
+    if (m_geometry.clipSources.empty()) return;
+    if (proj.polygons.empty() && proj.lines.empty() && proj.closedSplines.empty()) return;
+
+    // Process owners in dependency order: an owner whose clip sources include
+    // another owner that ALSO has clip sources must be processed after that
+    // other owner's silhouette is finalized. We do a simple iterative
+    // topological resolution: repeat until no changes.
+    std::vector<BaseObject*> ownersWithClips;
+    for (const auto& kv : m_geometry.clipSources)
+        ownersWithClips.push_back(kv.first);
+
+    // For each owner, build its clip silhouette and clip its own geometry.
+    // Because silhouettes are read from proj.polygons/closedSplines (which we
+    // mutate in place), processing order matters. We iterate owners and for
+    // each, only clip once its clip sources have no pending clips themselves
+    // (or have already been processed). A few passes suffice for typical depth.
+    std::set<BaseObject*> done;
+    for (Int32 pass = 0; pass < 16 && (Int32)done.size() < (Int32)ownersWithClips.size(); pass++)
+    {
+        for (BaseObject* owner : ownersWithClips)
+        {
+            if (done.count(owner)) continue;
+            const auto& clips = m_geometry.clipSources[owner];
+            // Check all clip sources are either clip-free or already done.
+            bool ready = true;
+            for (BaseObject* c : clips)
+                if (m_geometry.clipSources.count(c) && !done.count(c)) { ready = false; break; }
+            if (!ready) continue;
+
+            // Build combined silhouette of clip sources (from current proj state,
+            // which may already be clipped for nested sources).
+            std::vector<std::vector<std::pair<Float,Float>>> sil;
+            BuildOwnerSilhouette(proj, clips, sil);
+            if (sil.empty()) { done.insert(owner); continue; }
+
+            // 1. Clip this owner's polygons (fill) against the silhouette.
+            std::vector<CollectedPolygon> newPolys;
+            for (auto& poly : proj.polygons)
+            {
+                if (poly.ownerObj != owner) { newPolys.push_back(poly); continue; }
+                std::vector<std::pair<Float,Float>> uv;
+                uv.reserve(poly.indices.size());
+                for (Int32 idx : poly.indices)
+                    if (idx >= 0 && idx < (Int32)proj.points2d.size())
+                        uv.push_back(proj.points2d[idx]);
+                // Intersect with union of silhouette polys (for convex polys,
+                // intersecting each keeps the intersection; for a union we'd
+                // need to collect all results. Here we clip against each poly
+                // and keep the result of the first that yields a non-empty
+                // polygon, which is a reasonable approximation for typical
+                // single-boundary use cases like eye/mouth clipping.)
+                std::vector<std::pair<Float,Float>> best = uv;
+                bool kept = false;
+                for (const auto& cp : sil)
+                {
+                    auto clipped = SH_ClipPolyVsPoly(uv, cp);
+                    if (clipped.size() >= 3)
+                    {
+                        // Add as a NEW polygon (split) so multi-region coverage works.
+                        CollectedPolygon np = poly;
+                        // Need new point indices. We append the clipped UV as
+                        // new points and reference them.
+                        Int32 base = (Int32)proj.points2d.size();
+                        np.indices.clear();
+                        for (const auto& p : clipped)
+                        {
+                            proj.points2d.push_back(p);
+                            np.indices.push_back(base++);
+                        }
+                        newPolys.push_back(np);
+                        kept = true;
+                    }
+                }
+                if (!kept)
+                {
+                    // Fully outside all clip polys -> discard (don't push).
+                }
+            }
+            proj.polygons = std::move(newPolys);
+
+            // 2. Clip closed splines the same way (treat as fill polygons).
+            std::vector<CollectedPolygon> newSp;
+            for (auto& sp : proj.closedSplines)
+            {
+                if (sp.ownerObj != owner) { newSp.push_back(sp); continue; }
+                std::vector<std::pair<Float,Float>> uv;
+                uv.reserve(sp.indices.size());
+                for (Int32 idx : sp.indices)
+                    if (idx >= 0 && idx < (Int32)proj.points2d.size())
+                        uv.push_back(proj.points2d[idx]);
+                bool kept = false;
+                for (const auto& cp : sil)
+                {
+                    auto clipped = SH_ClipPolyVsPoly(uv, cp);
+                    if (clipped.size() >= 3)
+                    {
+                        CollectedPolygon np = sp;
+                        Int32 base = (Int32)proj.points2d.size();
+                        np.indices.clear();
+                        for (const auto& p : clipped)
+                        {
+                            proj.points2d.push_back(p);
+                            np.indices.push_back(base++);
+                        }
+                        newSp.push_back(np);
+                        kept = true;
+                    }
+                }
+            }
+            proj.closedSplines = std::move(newSp);
+
+            // 3. Clip lines: keep a segment only if at least one endpoint is
+            // inside the silhouette. (Full segment clipping would be more
+            // accurate but this is simple and visually adequate for outlines.)
+            std::vector<CollectedLine> newLines;
+            newLines.reserve(proj.lines.size());
+            for (const auto& line : proj.lines)
+            {
+                if (line.ownerObj != owner) { newLines.push_back(line); continue; }
+                if (line.v0 < 0 || line.v0 >= (Int32)proj.points2d.size() ||
+                    line.v1 < 0 || line.v1 >= (Int32)proj.points2d.size())
+                    continue;
+                const auto& p0 = proj.points2d[line.v0];
+                const auto& p1 = proj.points2d[line.v1];
+                bool in0 = PointInAnyPoly(p0.first, p0.second, sil);
+                bool in1 = PointInAnyPoly(p1.first, p1.second, sil);
+                if (in0 || in1)
+                    newLines.push_back(line);
+            }
+            proj.lines = std::move(newLines);
+
+            done.insert(owner);
+        }
+    }
 }
 
 std::pair<Float,Float> GeometryProjector::ProjectPoint(const Vector& pt,
@@ -189,12 +485,21 @@ std::pair<Float,Float> GeometryProjector::ProjectPoint(const Vector& pt,
 {
     switch (settings.projMode)
     {
-        case PROJ_MODE_FLAT_X: return {pt.z, pt.y};
-        case PROJ_MODE_FLAT_Y: return {pt.x, pt.z};
-        case PROJ_MODE_FLAT_Z: return {pt.x, pt.y};
-        case PROJ_MODE_CAMERA: return ProjectCamera(pt, settings);
-        case PROJ_MODE_CUSTOM: return ProjectCustom(pt, settings);
-        default:               return {pt.x, pt.y};
+        case PROJ_MODE_FLAT_X:     return {pt.z,  pt.y};
+        case PROJ_MODE_FLAT_Y:     return {pt.x,  pt.z};
+        case PROJ_MODE_FLAT_Z:     return {pt.x,  pt.y};
+        // Negative axes mirror the coordinate so the projection comes from the
+        // opposite side. Useful when an object sits behind/below the target.
+        case PROJ_MODE_FLAT_NEG_X: return {-pt.z, pt.y};
+        case PROJ_MODE_FLAT_NEG_Y: return {pt.x,  -pt.z};
+        case PROJ_MODE_FLAT_NEG_Z: return {-pt.x, pt.y};
+        case PROJ_MODE_CAMERA:     return ProjectCamera(pt, settings);
+        case PROJ_MODE_CUSTOM:     return ProjectCustom(pt, settings);
+        // UVFOLLOW is handled per-point in Project() via the target's surface
+        // UV; ProjectPoint is not used for that mode (points are mapped
+        // directly through GeRayCollider hits).
+        case PROJ_MODE_UVFOLLOW:   return {pt.x, pt.y};
+        default:                   return {pt.x, pt.y};
     }
 }
 

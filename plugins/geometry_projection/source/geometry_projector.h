@@ -71,9 +71,13 @@ struct ProjectionSettings
     // resolution  -- current render/preview resolution in pixels
     // targetObj   -- used for bounds-based normalization (may be nullptr)
     // doc         -- active document (needed for link resolution)
+    // sourceObjs  -- if targetObj is null and autoFit is on, the combined
+    //                world-space bounding box of these objects is used as the
+    //                projection plane (so all source geometry fits in UV [0..1]).
     static ProjectionSettings FromContainer(BaseContainer* bc, Int32 resolution,
                                              BaseObject* targetObj,
-                                             BaseDocument* doc);
+                                             BaseDocument* doc,
+                                             const std::vector<BaseObject*>& sourceObjs = {});
 
     // Scale a world-unit line width to pixels for the given resolution
     Float ScaleLineWidth(Float width, Int32 resolution) const
@@ -118,6 +122,10 @@ public:
                   ProjectedGeometry& outProjected);
 
 private:
+    // Snapshot of the geometry being projected (kept so ApplyClipping can read
+    // the clipSources map). Set at the start of Project().
+    const CollectedGeometry* m_geometry = nullptr;
+
     std::pair<Float,Float> ProjectPoint(const Vector& pt, const ProjectionSettings& settings);
     std::pair<Float,Float> ProjectCamera(const Vector& pt, const ProjectionSettings& settings);
     std::pair<Float,Float> ProjectCustom(const Vector& pt, const ProjectionSettings& settings);
@@ -132,4 +140,8 @@ private:
 
     std::pair<Float,Float> ApplyTransform(Float u, Float v,
                                            const ProjectionSettings& settings);
+
+    // Clip each owner object's projected geometry against its clip sources'
+    // silhouettes. Resolves nested clip dependencies in topological order.
+    void ApplyClipping(ProjectedGeometry& proj);
 };

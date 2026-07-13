@@ -21,8 +21,12 @@ STRINGTABLE Ogeometryprojector
     PROJ_MODE_FLAT_X "Flat X (Side)";
     PROJ_MODE_FLAT_Y "Flat Y (Top)";
     PROJ_MODE_FLAT_Z "Flat Z (Front)";
+    PROJ_MODE_FLAT_NEG_X "Flat -X (Side)";
+    PROJ_MODE_FLAT_NEG_Y "Flat -Y (Bottom)";
+    PROJ_MODE_FLAT_NEG_Z "Flat -Z (Back)";
     PROJ_MODE_CAMERA "Camera";
     PROJ_MODE_CUSTOM "Custom Direction";
+    PROJ_MODE_UVFOLLOW "UV Follow (curved surface)";
     PROJ_DIRECTION "Direction";
     PROJ_AUTO_FIT "Auto Fit to UV";
     PROJ_INVERT_X "Invert X";

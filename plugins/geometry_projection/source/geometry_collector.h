@@ -7,28 +7,35 @@
 #include "c4d.h"
 #include <vector>
 #include <set>
+#include <map>
 #include <utility>
 
 // A line segment with per-object color and thickness.
 // isSpline marks segments that belong to a spline (vs polygon edges). Spline
 // segments get round caps at EVERY vertex to avoid gaps at corners, which
 // otherwise make the spline look unevenly thick at turns.
+// ownerObj identifies which source object this line came from (used for the
+// clipping pass: lines of an object are clipped against its clip source's
+// projected silhouette).
 struct CollectedLine
 {
     Int32  v0, v1;
     Vector color;
     Float  thickness;
     Bool   isSpline = false;
+    BaseObject* ownerObj = nullptr;
 };
 
 // A polygon (triangle or quad) with per-object color and fill override.
 // fillOverride = true means use 'fill' instead of the global Draw Fill setting.
+// ownerObj identifies the source object (for the clipping pass).
 struct CollectedPolygon
 {
     std::vector<Int32> indices;
     Vector             color;
     Bool               fillOverride = false;
     Bool               fill         = false;
+    BaseObject*        ownerObj     = nullptr;
 };
 
 // All collected 3D geometry in world coordinates
@@ -39,12 +46,20 @@ struct CollectedGeometry
     std::vector<CollectedPolygon> polygons;
     std::vector<CollectedPolygon> closed_splines;
 
+    // For each source object, the list of objects whose projected silhouette
+    // should clip it. Populated by the collector from the
+    // ProjectionSettingsTag's PROJTAG_CLIP_SOURCES InExclude list.
+    // The clipping pass (in GeometryProjector::Project) uses this to clip the
+    // object's polygons/lines against the clip source's projected silhouette.
+    std::map<BaseObject*, std::vector<BaseObject*>> clipSources;
+
     void Clear()
     {
         points.clear();
         lines.clear();
         polygons.clear();
         closed_splines.clear();
+        clipSources.clear();
     }
 };
 
@@ -70,12 +85,13 @@ public:
 private:
     CollectedGeometry m_geometry;
 
-    // Per-object color/thickness/fill, resolved in CollectObject and used by the
-    // Collect* helpers when creating lines/polygons.
+    // Per-object color/thickness/fill/owner, resolved in CollectObject and used
+    // by the Collect* helpers when creating lines/polygons.
     Vector m_currentColor     = Vector(1, 1, 1);
     Float  m_currentThickness = 2.0;
     Bool   m_currentFillOverride = false;
     Bool   m_currentFill        = false;
+    BaseObject* m_currentOwner  = nullptr;
     Vector m_defaultColor     = Vector(1, 1, 1);
     Float  m_defaultThickness = 2.0;
     Bool   m_defaultFill      = false;

@@ -33,6 +33,10 @@ enum
     PROJ_MODE_FLAT_Z        = 2,
     PROJ_MODE_CAMERA        = 3,
     PROJ_MODE_CUSTOM        = 4,
+    PROJ_MODE_FLAT_NEG_X    = 5,
+    PROJ_MODE_FLAT_NEG_Y    = 6,
+    PROJ_MODE_FLAT_NEG_Z    = 7,
+    PROJ_MODE_UVFOLLOW      = 8,
 
     UV_OFFSET_X             = 1110,
     UV_OFFSET_Y             = 1111,

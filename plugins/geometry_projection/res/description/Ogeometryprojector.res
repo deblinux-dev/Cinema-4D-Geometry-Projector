@@ -27,7 +27,8 @@ CONTAINER Ogeometryprojector
             CYCLE
             {
                 PROJ_MODE_FLAT_X; PROJ_MODE_FLAT_Y; PROJ_MODE_FLAT_Z;
-                PROJ_MODE_CAMERA; PROJ_MODE_CUSTOM;
+                PROJ_MODE_FLAT_NEG_X; PROJ_MODE_FLAT_NEG_Y; PROJ_MODE_FLAT_NEG_Z;
+                PROJ_MODE_CAMERA; PROJ_MODE_CUSTOM; PROJ_MODE_UVFOLLOW;
             }
         }
         LINK PROJ_CAMERA_LINK { ACCEPT { Ocamera; } }
