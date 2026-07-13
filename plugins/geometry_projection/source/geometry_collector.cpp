@@ -98,30 +98,36 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
         // force interpolation and get a LineObject with real points.
         // RETAINLINEOBJECT is required for GetLineObject() to return a valid
         // object; GLOBALSPACE gives points in world coordinates.
-        SplineHelp sh;
-        if (sh.InitSpline(splineObj, SPLINEHELPFLAGS::GLOBALSPACE | SPLINEHELPFLAGS::RETAINLINEOBJECT))
+        // SplineHelp has a private constructor, so we must use Alloc/Free.
+        SplineHelp* sh = SplineHelp::Alloc();
+        if (sh)
         {
-            LineObject* lineObj = sh.GetLineObject();
-            if (lineObj && lineObj->GetPointCount() >= 2)
+            if (sh->InitSpline(splineObj, SPLINEHELPFLAGS::GLOBALSPACE | SPLINEHELPFLAGS::RETAINLINEOBJECT))
             {
-                SplineObject* realSpline = SplineObject::Alloc(lineObj->GetPointCount(), SPLINETYPE::LINEAR);
-                if (realSpline)
+                LineObject* lineObj = sh->GetLineObject();
+                if (lineObj && lineObj->GetPointCount() >= 2)
                 {
-                    const Vector* linePts = lineObj->GetPointR();
-                    Vector* splinePts = realSpline->GetPointW();
-                    if (linePts && splinePts)
+                    SplineObject* realSpline = SplineObject::Alloc(lineObj->GetPointCount(), SPLINETYPE::LINEAR);
+                    if (realSpline)
                     {
-                        for (Int32 i = 0; i < lineObj->GetPointCount(); i++)
-                            splinePts[i] = linePts[i];
-                        // Points are in global space (GLOBALSPACE flag), so use
-                        // an identity matrix for CollectSpline.
-                        CollectSpline(realSpline, Matrix(), splineSubdiv);
+                        const Vector* linePts = lineObj->GetPointR();
+                        Vector* splinePts = realSpline->GetPointW();
+                        if (linePts && splinePts)
+                        {
+                            for (Int32 i = 0; i < lineObj->GetPointCount(); i++)
+                                splinePts[i] = linePts[i];
+                            // Points are in global space (GLOBALSPACE flag), so use
+                            // an identity matrix for CollectSpline.
+                            CollectSpline(realSpline, Matrix(), splineSubdiv);
+                            SplineObject::Free(realSpline);
+                            SplineHelp::Free(sh);
+                            return;
+                        }
                         SplineObject::Free(realSpline);
-                        return;
                     }
-                    SplineObject::Free(realSpline);
                 }
             }
+            SplineHelp::Free(sh);
         }
 
         // Fallback: walk the cache (deform > generator) to find the
