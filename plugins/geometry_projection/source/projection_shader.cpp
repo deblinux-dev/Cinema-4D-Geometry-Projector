@@ -222,15 +222,19 @@ Vector ProjectionShader::CheckerPattern(Float u, Float v)
 
 Bool RegisterProjectionShader()
 {
-    // Try to load the shader icon from res/icons/. Non-fatal: registration
-    // proceeds without a custom icon if the file is missing or unreadable.
-    BaseBitmap* icon = BaseBitmap::Alloc();
-    if (icon)
+    BaseBitmap* icon = nullptr;
     {
-        if (icon->Init(GeGetPluginResourcePath() + "icons/xprojectionshader.png"_s) != IMAGERESULT::OK)
+        Filename resDir = GeGetPluginResourcePath();
+        Filename iconsDir = resDir + Filename("icons"_s);
+        Filename iconPath = iconsDir + Filename("xprojectionshader.png"_s);
+        icon = BaseBitmap::Alloc();
+        if (icon)
         {
-            BaseBitmap::Free(icon);
-            icon = nullptr;
+            if (icon->Init(iconPath) != IMAGERESULT::OK)
+            {
+                BaseBitmap::Free(icon);
+                icon = nullptr;
+            }
         }
     }
 

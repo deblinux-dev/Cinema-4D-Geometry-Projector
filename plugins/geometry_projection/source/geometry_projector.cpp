@@ -163,25 +163,26 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
     std::vector<std::pair<Float,Float>> pts2d;
     pts2d.reserve(ptCount);
 
-    // UV-follow mode: ray-cast each point against the target surface and
-    // sample UV at the hit. This completely replaces the flat projection
-    // math (no normalize/autofit/transform -- the UV comes directly from
-    // the target's UVW tag).
+    // UV-follow mode: ray-cast the SOURCE CENTER to the target to find the
+    // anchor UV, then flat-project all points (preserving the source's shape)
+    // and place them at the anchor UV. This produces a clean, undistorted
+    // silhouette on the target surface -- a square stays a square, a circle
+    // stays a circle -- just positioned at the right UV spot.
     if (settings.projMode == PROJ_MODE_UVFOLLOW)
     {
-        // Lazy-init the ray collider + UVW tag once per Project() call.
+        // Compute source center (centroid of all source points).
+        Vector sourceCenter(0);
+        for (Int32 i = 0; i < ptCount; i++)
+            sourceCenter += geometry.points[i];
+        if (ptCount > 0) sourceCenter /= (Float)ptCount;
+
         if (!m_uvFollowReady)
         {
-            m_uvFollowReady = InitUVFollow(settings);
+            m_uvFollowReady = InitUVFollow(settings, sourceCenter);
             if (!m_uvFollowReady)
-            {
-                // No valid target surface -- leave points2d empty so the
-                // rasterizer/shader shows the checkerboard fallback.
                 return;
-            }
         }
 
-        pts2d.reserve(ptCount);
         for (Int32 i = 0; i < ptCount; i++)
             pts2d.push_back(ProjectUVFollow(geometry.points[i], settings));
 
@@ -532,7 +533,8 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
 
 // ==================== UV Follow ====================
 
-Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings)
+Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
+                                      const Vector& sourceCenter)
 {
     // Clean up any previous state (in case Project() is called twice).
     if (m_rayCollider)
@@ -557,7 +559,6 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings)
             cache = cache->GetCache();
         if (!cache)
         {
-            // Try direct children as a last resort.
             cache = surfObj->GetDown();
             while (cache && !cache->IsInstanceOf(Opolygon))
                 cache = cache->GetNext();
@@ -567,12 +568,12 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings)
     }
     if (!surfObj->IsInstanceOf(Opolygon)) return false;
 
-    // Find the UVW tag (any Tuvw on the object).
+    // Find the UVW tag.
     BaseTag* tag = surfObj->GetTag(Tuvw);
     if (!tag) return false;
     m_uvwTag = tag;
 
-    // Build the ray collider. force=true so it picks up deformations/edits.
+    // Build the ray collider.
     GeRayCollider* rc = GeRayCollider::Alloc();
     if (!rc) return false;
     if (!rc->Init(surfObj, true))
@@ -582,12 +583,68 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings)
     }
     m_rayCollider = rc;
 
-    // Cache the target's inverse world matrix (to transform world-space points
-    // into the target's local space where polygons live) and the target center
-    // (ray direction = from point toward center).
+    // Cache the target's inverse world matrix and center.
     Matrix mg = surfObj->GetMg();
     m_targetInvMg = ~mg;
     m_targetCenter = mg * surfObj->GetMp();
+
+    // ---- Compute anchor UV ----
+    // Ray-cast from source center toward target center. The nearest hit gives
+    // the point on the target surface facing the source; sample its UV.
+    Vector localSrc = m_targetInvMg * sourceCenter;
+    Vector localTgt = m_targetInvMg * m_targetCenter;
+    Vector dir = localTgt - localSrc;
+    Float  len = dir.GetLength();
+    if (len < 1e-7) { m_anchorU = 0.5; m_anchorV = 0.5; }
+    else
+    {
+        dir = dir / len;
+        Float rayLen = len * 2.0 + 1000.0;
+        m_anchorU = 0.5; m_anchorV = 0.5;
+        if (rc->Intersect(localSrc, dir, rayLen, false))
+        {
+            GeRayColResult res;
+            if (rc->GetNearestIntersection(&res) && res.face_id >= 0)
+            {
+                UVWStruct us = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
+                Float u = res.barrycoords.x;
+                Float v = res.barrycoords.y;
+                Bool secondHalf = (res.tri_face_id < 0);
+                Vector uvw;
+                if (!secondHalf)
+                    uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
+                else
+                    uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
+                m_anchorU = uvw.x;
+                m_anchorV = uvw.y;
+            }
+        }
+    }
+
+    // ---- Compute flat projection basis ----
+    // The plane is perpendicular to the source→target direction. We build
+    // right/up vectors on this plane. All source points are flat-projected
+    // onto this plane, preserving their original shape (no curvature distortion).
+    Vector fwd = m_targetCenter - sourceCenter;
+    Float fwdLen = fwd.GetLength();
+    if (fwdLen < 1e-7) fwd = Vector(0, 0, 1);
+    else fwd = fwd / fwdLen;
+
+    m_flatRight = Cross(Vector(0, 1, 0), fwd);
+    if (m_flatRight.GetLength() < 1e-6)
+        m_flatRight = Cross(Vector(1, 0, 0), fwd);
+    m_flatRight.Normalize();
+    m_flatUp = Cross(fwd, m_flatRight);
+    m_flatUp.Normalize();
+    m_flatOrigin = sourceCenter;
+
+    // Normalization range: use the target's bounding box diameter as a scale
+    // so the source's flat silhouette is sized proportionally to the target.
+    Vector rad = surfObj->GetRad();
+    Float targetDiam = (rad.x + rad.y + rad.z) * (2.0 / 3.0); // average diameter
+    if (targetDiam < 1e-6) targetDiam = 1.0;
+    m_flatRangeX = targetDiam;
+    m_flatRangeY = targetDiam;
 
     m_uvFollowReady = true;
     return true;
@@ -596,85 +653,28 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings)
 std::pair<Float,Float> GeometryProjector::ProjectUVFollow(const Vector& pt,
                                                             const ProjectionSettings& settings)
 {
-    if (!m_uvFollowReady || !m_rayCollider || !m_uvwTag) return {0.0, 0.0};
+    if (!m_uvFollowReady) return {m_anchorU, m_anchorV};
 
-    GeRayCollider* rc = static_cast<GeRayCollider*>(m_rayCollider);
-    UVWTag* uvwTag = static_cast<UVWTag*>(m_uvwTag);
+    // Flat-project the point onto the plane perpendicular to source→target.
+    // This preserves the source's original shape (square stays square).
+    Vector d = pt - m_flatOrigin;
+    Float flatX = Dot(d, m_flatRight);
+    Float flatY = Dot(d, m_flatUp);
 
-    // Ray from the world-space point toward the target center. Transform both
-    // into the target's local space for GeRayCollider (which works in object
-    // coordinates).
-    Vector localP = m_targetInvMg * pt;
-    Vector localC = m_targetInvMg * m_targetCenter;
-    Vector dir = localC - localP;
-    Float  len = dir.GetLength();
-    if (len < 1e-7) return {0.0, 0.0};
-    dir = dir / len;
-    // Use a generous ray length so we hit even if the point is far from target.
-    Float rayLen = len * 2.0 + 1000.0;
+    // Normalize to [-0.5..0.5] range relative to the target's size, then
+    // offset by the anchor UV. This places the flat silhouette at the UV
+    // coordinate where the source center hits the target.
+    Float normU = flatX / m_flatRangeX;
+    Float normV = flatY / m_flatRangeY;
 
-    if (!rc->Intersect(localP, dir, rayLen, false))
-    {
-        // No hit -- ray went past the target. Fall back to "shape cast":
-        // find the closest point on the target surface by sampling the nearest
-        // polygon vertex (a cheap approximation; full closest-point-on-mesh
-        // would need a BVH which is overkill here). We pick the polygon whose
-        // centroid is nearest to localP and sample its UV at the centroid.
-        PolygonObject* polyObj = static_cast<PolygonObject*>(uvwTag->GetObject());
-        if (!polyObj) return {0.0, 0.0};
-        const Vector*   pts  = polyObj->GetPointR();
-        const CPolygon* polys = polyObj->GetPolygonR();
-        Int32 polyCount = polyObj->GetPolygonCount();
-        if (!pts || !polys || polyCount <= 0) return {0.0, 0.0};
+    Float u = m_anchorU + normU;
+    Float v = m_anchorV + normV;
 
-        Float bestDist = std::numeric_limits<Float>::max();
-        Int32 bestPoly = 0;
-        for (Int32 i = 0; i < polyCount; i++)
-        {
-            const CPolygon& p = polys[i];
-            Vector c = (pts[p.a] + pts[p.b] + pts[p.c]) * (1.0 / 3.0);
-            if (p.c != p.d) c = (pts[p.a] + pts[p.b] + pts[p.c] + pts[p.d]) * 0.25;
-            Float d = (c - localP).GetLength();
-            if (d < bestDist) { bestDist = d; bestPoly = i; }
-        }
-        UVWStruct us = uvwTag->GetSlow(bestPoly);
-        // Sample at the polygon centroid (average of a/b/c).
-        return { (us.a.x + us.b.x + us.c.x) / 3.0,
-                 (us.a.y + us.b.y + us.c.y) / 3.0 };
-    }
+    // Wrap around [0..1] so the silhouette is visible even across UV seams.
+    u = u - std::floor(u);
+    v = v - std::floor(v);
 
-    // Use the nearest intersection (closest to the ray origin = closest to
-    // the source point, i.e. the side of the target the source is on).
-    GeRayColResult res;
-    if (!rc->GetNearestIntersection(&res)) return {0.0, 0.0};
-
-    // Sample UV at the hit using barycentric coordinates.
-    // res.barrycoords: x=u, y=v, z=d (distance along tri). The polygon is split
-    // into two triangles; tri_face_id tells us which half. For a triangle
-    // (a,b,c): uv = a_uv + u*(b_uv-a_uv) + v*(c_uv-a_uv).
-    Int32 polyId = res.face_id;
-    if (polyId < 0) return {0.0, 0.0};
-
-    UVWStruct us = uvwTag->GetSlow(polyId);
-    Float u = res.barrycoords.x;
-    Float v = res.barrycoords.y;
-
-    // tri_face_id > 0 means first half (a,b,c); < 0 means second half (a,c,d)
-    // for a quad. For a triangle it's always the first half.
-    Bool secondHalf = (res.tri_face_id < 0);
-
-    Vector uvw;
-    if (!secondHalf)
-    {
-        // triangle a,b,c
-        uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
-    }
-    else
-    {
-        // triangle a,c,d (second half of the quad)
-        uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
-    }
-    return { uvw.x, uvw.y };
+    return { u, v };
 }
 
 std::pair<Float,Float> GeometryProjector::ProjectPoint(const Vector& pt,

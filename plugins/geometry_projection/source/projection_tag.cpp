@@ -28,15 +28,19 @@ Bool ProjectionSettingsTag::Init(GeListNode* node)
 
 Bool RegisterProjectionSettingsTag()
 {
-    // Try to load the tag icon from res/icons/. Non-fatal: registration
-    // proceeds without a custom icon if the file is missing or unreadable.
-    BaseBitmap* icon = BaseBitmap::Alloc();
-    if (icon)
+    BaseBitmap* icon = nullptr;
     {
-        if (icon->Init(GeGetPluginResourcePath() + "icons/tprojectionsettings.png"_s) != IMAGERESULT::OK)
+        Filename resDir = GeGetPluginResourcePath();
+        Filename iconsDir = resDir + Filename("icons"_s);
+        Filename iconPath = iconsDir + Filename("tprojectionsettings.png"_s);
+        icon = BaseBitmap::Alloc();
+        if (icon)
         {
-            BaseBitmap::Free(icon);
-            icon = nullptr;
+            if (icon->Init(iconPath) != IMAGERESULT::OK)
+            {
+                BaseBitmap::Free(icon);
+                icon = nullptr;
+            }
         }
     }
 

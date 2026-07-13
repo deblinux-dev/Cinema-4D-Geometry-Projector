@@ -94,7 +94,20 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
             return;
         }
 
-        // Parametric spline: walk the cache (deform > generator) to find the
+        // Parametric spline: try GetRealSpline() first. Despite the SDK docs
+        // saying it returns nullptr for primitives, in practice on R21 it
+        // often builds and returns a real interpolated SplineObject for
+        // parametric spline primitives (Circle, Rectangle, Arc, etc.).
+        SplineObject* realSpline = splineObj->GetRealSpline();
+        if (realSpline && realSpline != splineObj && realSpline->GetPointCount() >= 2)
+        {
+            // GetRealSpline returned a new object (the interpolated spline).
+            // Use the ORIGINAL object's world matrix (per SDK docs).
+            CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
+            return;
+        }
+
+        // Fallback: walk the cache (deform > generator) to find the
         // generated Ospline. CollectFromCache recurses into children/sub-caches
         // and uses IsInstanceOf(Ospline), so it will find the real spline
         // wherever C4D put it.

@@ -213,6 +213,22 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
     // CompareDependenceList returns true if NOTHING changed since last eval.
     Bool dirty = !op->CompareDependenceList();
 
+    // Supplementary check: if the dependence list says "no change" but a
+    // source object IsDirty (e.g. it was moved but C4D's dependence tracking
+    // hasn't registered it yet -- which can happen when no target object is
+    // set and the only dependencies are InExclude links), force a rebuild.
+    // This ensures real-time updates work even without a target object.
+    if (!dirty && srcList)
+    {
+        Int32 cnt = srcList->GetObjectCount();
+        for (Int32 i = 0; i < cnt && !dirty; i++)
+        {
+            BaseObject* srcObj = static_cast<BaseObject*>(srcList->ObjectFromIndex(doc, i));
+            if (srcObj && srcObj->IsDirty(DIRTYFLAGS::MATRIX | DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE))
+                dirty = true;
+        }
+    }
+
     ProjectionCache* cache = GetCache(op);
 
     if (dirty || !cache || !cache->rasterValid)
@@ -645,15 +661,23 @@ void GeometryProjectorObject::DrawBounds(BaseObject* op, BaseDraw* bd, BaseDrawH
 
 Bool RegisterGeometryProjectorObject()
 {
-    // Try to load the icon from res/icons/. Non-fatal: if it fails the plugin
-    // still registers, just without a custom icon in the Object Manager.
-    BaseBitmap* icon = BaseBitmap::Alloc();
-    if (icon)
+    // Load the icon from res/icons/. GeGetPluginResourcePath() returns the res
+    // directory; we append "icons" as a subdirectory, then the filename.
+    // Using nested Filename operations (not String with "/") because the
+    // Filename + String operator does NOT parse path separators on Windows.
+    BaseBitmap* icon = nullptr;
     {
-        if (icon->Init(GeGetPluginResourcePath() + "icons/ogeometryprojector.png"_s) != IMAGERESULT::OK)
+        Filename resDir = GeGetPluginResourcePath();
+        Filename iconsDir = resDir + Filename("icons"_s);
+        Filename iconPath = iconsDir + Filename("ogeometryprojector.png"_s);
+        icon = BaseBitmap::Alloc();
+        if (icon)
         {
-            BaseBitmap::Free(icon);
-            icon = nullptr;
+            if (icon->Init(iconPath) != IMAGERESULT::OK)
+            {
+                BaseBitmap::Free(icon);
+                icon = nullptr;
+            }
         }
     }
 

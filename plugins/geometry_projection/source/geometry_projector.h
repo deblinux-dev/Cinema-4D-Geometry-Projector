@@ -139,6 +139,13 @@ private:
     Matrix m_targetInvMg;            // target world matrix inverse
     Vector m_targetCenter;           // target bounds center (world)
     Bool   m_uvFollowReady = false;
+    // Anchor UV: the UV coordinate on the target where the source center
+    // projects to. All source points are flat-projected relative to this.
+    Float m_anchorU = 0.5, m_anchorV = 0.5;
+    // Flat projection basis (right, up) perpendicular to source→target dir.
+    Vector m_flatRight, m_flatUp, m_flatOrigin;
+    // Normalization range for flat-projected coords (source bounding box).
+    Float m_flatRangeX = 1.0, m_flatRangeY = 1.0;
 
     std::pair<Float,Float> ProjectPoint(const Vector& pt, const ProjectionSettings& settings);
     std::pair<Float,Float> ProjectCamera(const Vector& pt, const ProjectionSettings& settings);
@@ -147,8 +154,10 @@ private:
     // rayCollider / uvwTag / targetInvMg are cached per-Project() call.
     std::pair<Float,Float> ProjectUVFollow(const Vector& pt, const ProjectionSettings& settings);
     // Initialize the ray collider + UVW tag + target inverse matrix for a
-    // UV-follow pass. Returns false if no valid polygon target is available.
-    Bool InitUVFollow(const ProjectionSettings& settings);
+    // UV-follow pass. sourceCenter is the centroid of all source points;
+    // it's ray-cast to the target to find the anchor UV. Returns false if
+    // no valid polygon target is available.
+    Bool InitUVFollow(const ProjectionSettings& settings, const Vector& sourceCenter);
 
     void GetTargetUVBounds(const ProjectionSettings& settings,
                             Float& outMinX, Float& outMinY,
