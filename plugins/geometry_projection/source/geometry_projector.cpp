@@ -178,7 +178,7 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
 
         if (!m_uvFollowReady)
         {
-            m_uvFollowReady = InitUVFollow(settings, sourceCenter);
+            m_uvFollowReady = InitUVFollow(settings, sourceCenter, geometry.points);
             if (!m_uvFollowReady)
                 return;
         }
@@ -534,7 +534,8 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
 // ==================== UV Follow ====================
 
 Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
-                                      const Vector& sourceCenter)
+                                      const Vector& sourceCenter,
+                                      const std::vector<Vector>& sourcePoints)
 {
     // Clean up any previous state (in case Project() is called twice).
     if (m_rayCollider)
@@ -568,12 +569,10 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
     }
     if (!surfObj->IsInstanceOf(Opolygon)) return false;
 
-    // Find the UVW tag.
     BaseTag* tag = surfObj->GetTag(Tuvw);
     if (!tag) return false;
     m_uvwTag = tag;
 
-    // Build the ray collider.
     GeRayCollider* rc = GeRayCollider::Alloc();
     if (!rc) return false;
     if (!rc->Init(surfObj, true))
@@ -583,48 +582,11 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
     }
     m_rayCollider = rc;
 
-    // Cache the target's inverse world matrix and center.
     Matrix mg = surfObj->GetMg();
     m_targetInvMg = ~mg;
     m_targetCenter = mg * surfObj->GetMp();
 
-    // ---- Compute anchor UV ----
-    // Ray-cast from source center toward target center. The nearest hit gives
-    // the point on the target surface facing the source; sample its UV.
-    Vector localSrc = m_targetInvMg * sourceCenter;
-    Vector localTgt = m_targetInvMg * m_targetCenter;
-    Vector dir = localTgt - localSrc;
-    Float  len = dir.GetLength();
-    if (len < 1e-7) { m_anchorU = 0.5; m_anchorV = 0.5; }
-    else
-    {
-        dir = dir / len;
-        Float rayLen = len * 2.0 + 1000.0;
-        m_anchorU = 0.5; m_anchorV = 0.5;
-        if (rc->Intersect(localSrc, dir, rayLen, false))
-        {
-            GeRayColResult res;
-            if (rc->GetNearestIntersection(&res) && res.face_id >= 0)
-            {
-                UVWStruct us = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
-                Float u = res.barrycoords.x;
-                Float v = res.barrycoords.y;
-                Bool secondHalf = (res.tri_face_id < 0);
-                Vector uvw;
-                if (!secondHalf)
-                    uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
-                else
-                    uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
-                m_anchorU = uvw.x;
-                m_anchorV = uvw.y;
-            }
-        }
-    }
-
     // ---- Compute flat projection basis ----
-    // The plane is perpendicular to the source→target direction. We build
-    // right/up vectors on this plane. All source points are flat-projected
-    // onto this plane, preserving their original shape (no curvature distortion).
     Vector fwd = m_targetCenter - sourceCenter;
     Float fwdLen = fwd.GetLength();
     if (fwdLen < 1e-7) fwd = Vector(0, 0, 1);
@@ -638,13 +600,99 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
     m_flatUp.Normalize();
     m_flatOrigin = sourceCenter;
 
-    // Normalization range: use the target's bounding box diameter as a scale
-    // so the source's flat silhouette is sized proportionally to the target.
-    Vector rad = surfObj->GetRad();
-    Float targetDiam = (rad.x + rad.y + rad.z) * (2.0 / 3.0); // average diameter
-    if (targetDiam < 1e-6) targetDiam = 1.0;
-    m_flatRangeX = targetDiam;
-    m_flatRangeY = targetDiam;
+    // Size the flat silhouette to the source's own extent (so it keeps its
+    // real proportions) rather than the target diameter.
+    Float srcMinX =  std::numeric_limits<Float>::max();
+    Float srcMinY =  std::numeric_limits<Float>::max();
+    Float srcMaxX = -std::numeric_limits<Float>::max();
+    Float srcMaxY = -std::numeric_limits<Float>::max();
+    for (const Vector& p : sourcePoints)
+    {
+        Vector d = p - m_flatOrigin;
+        Float fx = Dot(d, m_flatRight);
+        Float fy = Dot(d, m_flatUp);
+        if (fx < srcMinX) srcMinX = fx;
+        if (fx > srcMaxX) srcMaxX = fx;
+        if (fy < srcMinY) srcMinY = fy;
+        if (fy > srcMaxY) srcMaxY = fy;
+    }
+    m_flatRangeX = (srcMaxX - srcMinX > 1e-6) ? (srcMaxX - srcMinX) : 1.0;
+    m_flatRangeY = (srcMaxY - srcMinY > 1e-6) ? (srcMaxY - srcMinY) : 1.0;
+    m_flatCentroidX = (srcMinX + srcMaxX) * 0.5;
+    m_flatCentroidY = (srcMinY + srcMaxY) * 0.5;
+
+    // ---- Compute anchor UV as the UV centroid of ray-hit points ----
+    // Ray-cast ALL source points (not just the center) and average their hit
+    // UVs. This is far more stable than ray-casting a single point: when the
+    // source crosses a polygon boundary, only ONE point's UV jumps, while the
+    // centroid of dozens of hits stays smooth. To avoid the averaging being
+    // corrupted by UV-seam splits (hits on u=0.99 vs u=0.01), we wrap each
+    // hit's UV delta relative to the first hit to the [-0.5..0.5] range
+    // before accumulating.
+    m_anchorU = 0.5; m_anchorV = 0.5;
+    {
+        Vector localSrc = m_targetInvMg * sourceCenter;
+        Vector localTgt = m_targetInvMg * m_targetCenter;
+        Vector dir = localTgt - localSrc;
+        Float len = dir.GetLength();
+        if (len >= 1e-7)
+        {
+            dir = dir / len;
+            Float rayLen = len * 2.0 + 1000.0;
+
+            Float sumU = 0.0, sumV = 0.0;
+            Int32 hitCount = 0;
+            Float refU = 0.0, refV = 0.0;
+            bool haveRef = false;
+
+            for (const Vector& p : sourcePoints)
+            {
+                Vector localP = m_targetInvMg * p;
+                if (!rc->Intersect(localP, dir, rayLen, false)) continue;
+                GeRayColResult res;
+                if (!rc->GetNearestIntersection(&res)) continue;
+                if (res.face_id < 0) continue;
+
+                UVWStruct us = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
+                Float u = res.barrycoords.x;
+                Float v = res.barrycoords.y;
+                Bool secondHalf = (res.tri_face_id < 0);
+                Vector uvw;
+                if (!secondHalf)
+                    uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
+                else
+                    uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
+
+                if (!haveRef)
+                {
+                    refU = uvw.x; refV = uvw.y;
+                    sumU = uvw.x; sumV = uvw.y;
+                    haveRef = true;
+                }
+                else
+                {
+                    // Wrap delta to [-0.5..0.5] so seam-crossing hits don't
+                    // corrupt the centroid.
+                    Float du = uvw.x - refU;
+                    Float dv = uvw.y - refV;
+                    du = du - std::floor(du + 0.5);
+                    dv = dv - std::floor(dv + 0.5);
+                    sumU += refU + du;
+                    sumV += refV + dv;
+                }
+                hitCount++;
+            }
+
+            if (hitCount > 0)
+            {
+                m_anchorU = sumU / (Float)hitCount;
+                m_anchorV = sumV / (Float)hitCount;
+                // Wrap to [0..1]
+                m_anchorU = m_anchorU - std::floor(m_anchorU);
+                m_anchorV = m_anchorV - std::floor(m_anchorV);
+            }
+        }
+    }
 
     m_uvFollowReady = true;
     return true;
@@ -655,22 +703,20 @@ std::pair<Float,Float> GeometryProjector::ProjectUVFollow(const Vector& pt,
 {
     if (!m_uvFollowReady) return {m_anchorU, m_anchorV};
 
-    // Flat-project the point onto the plane perpendicular to source→target.
-    // This preserves the source's original shape (square stays square).
+    // Flat-project the point (preserves source shape).
     Vector d = pt - m_flatOrigin;
     Float flatX = Dot(d, m_flatRight);
     Float flatY = Dot(d, m_flatUp);
 
-    // Normalize to [-0.5..0.5] range relative to the target's size, then
-    // offset by the anchor UV. This places the flat silhouette at the UV
-    // coordinate where the source center hits the target.
-    Float normU = flatX / m_flatRangeX;
-    Float normV = flatY / m_flatRangeY;
+    // Normalize relative to the source's own centroid and extent, so the
+    // silhouette spans roughly [-0.5..0.5] in both axes.
+    Float normU = (flatX - m_flatCentroidX) / m_flatRangeX;
+    Float normV = (flatY - m_flatCentroidY) / m_flatRangeY;
 
     Float u = m_anchorU + normU;
     Float v = m_anchorV + normV;
 
-    // Wrap around [0..1] so the silhouette is visible even across UV seams.
+    // Wrap to [0..1].
     u = u - std::floor(u);
     v = v - std::floor(v);
 

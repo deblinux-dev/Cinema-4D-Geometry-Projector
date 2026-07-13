@@ -4,6 +4,7 @@
 #include "projection_tag.h"
 #include "description/Tprojectionsettings.h"
 #include "customgui_inexclude.h"
+#include "c4d_libs/lib_splinehelp.h"
 #include <cmath>
 
 void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
@@ -78,47 +79,59 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     }
 
     // For spline objects (editable OR parametric like Circle/Rectangle/Arc):
-    //  - Editable splines store points directly on the object (GetPointCount() >= 2)
-    //  - Parametric splines (Circle, Rectangle) have NO points on the object;
-    //    their geometry lives in the CACHE as a generated Ospline.
-    //    GetRealSpline() returns nullptr for them per SDK docs, so we must
-    //    walk the cache to find the generated Ospline.
+    // Use SplineHelp which reliably builds an interpolated LineObject for
+    // BOTH editable and parametric spline primitives. This is the most robust
+    // approach -- GetRealSpline() returns nullptr for primitives, and the
+    // cache may be empty on first eval, but SplineHelp always produces points.
     if (obj->IsInstanceOf(Ospline))
     {
         SplineObject* splineObj = static_cast<SplineObject*>(obj);
 
-        // Editable spline: points are on the object itself
+        // Editable spline with points: use the points directly.
         if (splineObj->GetPointCount() >= 2)
         {
             CollectSpline(splineObj, obj->GetMg(), splineSubdiv);
             return;
         }
 
-        // Parametric spline: try GetRealSpline() first. Despite the SDK docs
-        // saying it returns nullptr for primitives, in practice on R21 it
-        // often builds and returns a real interpolated SplineObject for
-        // parametric spline primitives (Circle, Rectangle, Arc, etc.).
-        SplineObject* realSpline = splineObj->GetRealSpline();
-        if (realSpline && realSpline != splineObj && realSpline->GetPointCount() >= 2)
+        // Parametric spline (Circle, Rectangle, Arc...): build a SplineHelp to
+        // force interpolation and get a LineObject with real points.
+        // RETAINLINEOBJECT is required for GetLineObject() to return a valid
+        // object; GLOBALSPACE gives points in world coordinates.
+        SplineHelp sh;
+        if (sh.InitSpline(splineObj, SPLINEHELPFLAGS::GLOBALSPACE | SPLINEHELPFLAGS::RETAINLINEOBJECT))
         {
-            // GetRealSpline returned a new object (the interpolated spline).
-            // Use the ORIGINAL object's world matrix (per SDK docs).
-            CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
-            return;
+            LineObject* lineObj = sh.GetLineObject();
+            if (lineObj && lineObj->GetPointCount() >= 2)
+            {
+                SplineObject* realSpline = SplineObject::Alloc(lineObj->GetPointCount(), SPLINETYPE::LINEAR);
+                if (realSpline)
+                {
+                    const Vector* linePts = lineObj->GetPointR();
+                    Vector* splinePts = realSpline->GetPointW();
+                    if (linePts && splinePts)
+                    {
+                        for (Int32 i = 0; i < lineObj->GetPointCount(); i++)
+                            splinePts[i] = linePts[i];
+                        // Points are in global space (GLOBALSPACE flag), so use
+                        // an identity matrix for CollectSpline.
+                        CollectSpline(realSpline, Matrix(), splineSubdiv);
+                        SplineObject::Free(realSpline);
+                        return;
+                    }
+                    SplineObject::Free(realSpline);
+                }
+            }
         }
 
         // Fallback: walk the cache (deform > generator) to find the
-        // generated Ospline. CollectFromCache recurses into children/sub-caches
-        // and uses IsInstanceOf(Ospline), so it will find the real spline
-        // wherever C4D put it.
+        // generated Ospline.
         BaseObject* cache = GetBestCache(obj);
         if (cache)
         {
             CollectFromCache(cache, obj->GetMg(), doc, splineSubdiv);
             return;
         }
-        // No cache yet (first eval pass) -- nothing to collect this frame.
-        // The next dirty tick after C4D builds the cache will retry.
         return;
     }
 

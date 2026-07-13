@@ -139,13 +139,17 @@ private:
     Matrix m_targetInvMg;            // target world matrix inverse
     Vector m_targetCenter;           // target bounds center (world)
     Bool   m_uvFollowReady = false;
-    // Anchor UV: the UV coordinate on the target where the source center
-    // projects to. All source points are flat-projected relative to this.
-    Float m_anchorU = 0.5, m_anchorV = 0.5;
     // Flat projection basis (right, up) perpendicular to source→target dir.
     Vector m_flatRight, m_flatUp, m_flatOrigin;
     // Normalization range for flat-projected coords (source bounding box).
     Float m_flatRangeX = 1.0, m_flatRangeY = 1.0;
+    // Centroid of the flat-projected source (used to center the silhouette
+    // on the anchor UV). Computed once in InitUVFollow.
+    Float m_flatCentroidX = 0.0, m_flatCentroidY = 0.0;
+    // Anchor UV: the UV coordinate on the target where the source center
+    // projects to. Computed as the UV centroid of all ray-hit points to
+    // avoid jumps when the source crosses polygon boundaries.
+    Float m_anchorU = 0.5, m_anchorV = 0.5;
 
     std::pair<Float,Float> ProjectPoint(const Vector& pt, const ProjectionSettings& settings);
     std::pair<Float,Float> ProjectCamera(const Vector& pt, const ProjectionSettings& settings);
@@ -153,11 +157,16 @@ private:
     // UV-follow: ray-cast from pt toward target center, sample UV at hit.
     // rayCollider / uvwTag / targetInvMg are cached per-Project() call.
     std::pair<Float,Float> ProjectUVFollow(const Vector& pt, const ProjectionSettings& settings);
-    // Initialize the ray collider + UVW tag + target inverse matrix for a
-    // UV-follow pass. sourceCenter is the centroid of all source points;
-    // it's ray-cast to the target to find the anchor UV. Returns false if
-    // no valid polygon target is available.
-    Bool InitUVFollow(const ProjectionSettings& settings, const Vector& sourceCenter);
+    // Initialize the ray collider + UVW tag + flat basis for a UV-follow pass.
+    // sourceCenter: centroid of source points (for ray-cast anchor direction).
+    // sourcePoints: all source points, used to (a) compute the flat-projected
+    //               centroid and (b) ray-cast a sample of them to get a stable
+    //               UV anchor (centroid of hit UVs) that doesn't jump when the
+    //               source crosses polygon boundaries.
+    // Returns false if no valid polygon target is available.
+    Bool InitUVFollow(const ProjectionSettings& settings,
+                      const Vector& sourceCenter,
+                      const std::vector<Vector>& sourcePoints);
 
     void GetTargetUVBounds(const ProjectionSettings& settings,
                             Float& outMinX, Float& outMinY,
