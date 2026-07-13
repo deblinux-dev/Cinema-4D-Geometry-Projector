@@ -600,8 +600,10 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
     m_flatUp.Normalize();
     m_flatOrigin = sourceCenter;
 
-    // Size the flat silhouette to the source's own extent (so it keeps its
-    // real proportions) rather than the target diameter.
+    // Size the flat silhouette relative to the TARGET's size, so a small
+    // source produces a small decal on the target surface (not a half-UV
+    // monstrosity that wraps and duplicates). The source's real-world size
+    // divided by the target's diameter gives the UV-space fraction.
     Float srcMinX =  std::numeric_limits<Float>::max();
     Float srcMinY =  std::numeric_limits<Float>::max();
     Float srcMaxX = -std::numeric_limits<Float>::max();
@@ -616,19 +618,20 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
         if (fy < srcMinY) srcMinY = fy;
         if (fy > srcMaxY) srcMaxY = fy;
     }
-    m_flatRangeX = (srcMaxX - srcMinX > 1e-6) ? (srcMaxX - srcMinX) : 1.0;
-    m_flatRangeY = (srcMaxY - srcMinY > 1e-6) ? (srcMaxY - srcMinY) : 1.0;
     m_flatCentroidX = (srcMinX + srcMaxX) * 0.5;
     m_flatCentroidY = (srcMinY + srcMaxY) * 0.5;
 
-    // ---- Compute anchor UV as the UV centroid of ray-hit points ----
-    // Ray-cast ALL source points (not just the center) and average their hit
-    // UVs. This is far more stable than ray-casting a single point: when the
-    // source crosses a polygon boundary, only ONE point's UV jumps, while the
-    // centroid of dozens of hits stays smooth. To avoid the averaging being
-    // corrupted by UV-seam splits (hits on u=0.99 vs u=0.01), we wrap each
-    // hit's UV delta relative to the first hit to the [-0.5..0.5] range
-    // before accumulating.
+    // Target diameter (world units) determines the UV scale.
+    Vector rad = surfObj->GetRad();
+    Float targetDiam = (rad.x + rad.y + rad.z) * (2.0 / 3.0);
+    if (targetDiam < 1e-6) targetDiam = 1.0;
+    m_flatRangeX = targetDiam;
+    m_flatRangeY = targetDiam;
+
+    // ---- Compute anchor UV from source center ray-cast ----
+    // Ray-cast from source center toward target center. The nearest hit gives
+    // the point on the target surface facing the source (the 'near side').
+    // This is where the decal's center sits on the UV map.
     m_anchorU = 0.5; m_anchorV = 0.5;
     {
         Vector localSrc = m_targetInvMg * sourceCenter;
@@ -639,57 +642,23 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
         {
             dir = dir / len;
             Float rayLen = len * 2.0 + 1000.0;
-
-            Float sumU = 0.0, sumV = 0.0;
-            Int32 hitCount = 0;
-            Float refU = 0.0, refV = 0.0;
-            bool haveRef = false;
-
-            for (const Vector& p : sourcePoints)
+            if (rc->Intersect(localSrc, dir, rayLen, false))
             {
-                Vector localP = m_targetInvMg * p;
-                if (!rc->Intersect(localP, dir, rayLen, false)) continue;
                 GeRayColResult res;
-                if (!rc->GetNearestIntersection(&res)) continue;
-                if (res.face_id < 0) continue;
-
-                UVWStruct us = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
-                Float u = res.barrycoords.x;
-                Float v = res.barrycoords.y;
-                Bool secondHalf = (res.tri_face_id < 0);
-                Vector uvw;
-                if (!secondHalf)
-                    uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
-                else
-                    uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
-
-                if (!haveRef)
+                if (rc->GetNearestIntersection(&res) && res.face_id >= 0)
                 {
-                    refU = uvw.x; refV = uvw.y;
-                    sumU = uvw.x; sumV = uvw.y;
-                    haveRef = true;
+                    UVWStruct us = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
+                    Float u = res.barrycoords.x;
+                    Float v = res.barrycoords.y;
+                    Bool secondHalf = (res.tri_face_id < 0);
+                    Vector uvw;
+                    if (!secondHalf)
+                        uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
+                    else
+                        uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
+                    m_anchorU = uvw.x;
+                    m_anchorV = uvw.y;
                 }
-                else
-                {
-                    // Wrap delta to [-0.5..0.5] so seam-crossing hits don't
-                    // corrupt the centroid.
-                    Float du = uvw.x - refU;
-                    Float dv = uvw.y - refV;
-                    du = du - std::floor(du + 0.5);
-                    dv = dv - std::floor(dv + 0.5);
-                    sumU += refU + du;
-                    sumV += refV + dv;
-                }
-                hitCount++;
-            }
-
-            if (hitCount > 0)
-            {
-                m_anchorU = sumU / (Float)hitCount;
-                m_anchorV = sumV / (Float)hitCount;
-                // Wrap to [0..1]
-                m_anchorU = m_anchorU - std::floor(m_anchorU);
-                m_anchorV = m_anchorV - std::floor(m_anchorV);
             }
         }
     }
@@ -708,17 +677,19 @@ std::pair<Float,Float> GeometryProjector::ProjectUVFollow(const Vector& pt,
     Float flatX = Dot(d, m_flatRight);
     Float flatY = Dot(d, m_flatUp);
 
-    // Normalize relative to the source's own centroid and extent, so the
-    // silhouette spans roughly [-0.5..0.5] in both axes.
+    // Normalize relative to the TARGET's diameter, so the silhouette is
+    // proportional to (sourceSize / targetSize). A 1-unit cube on a 10-unit
+    // sphere occupies ~10% of UV space -- small enough to not wrap/duplicate.
     Float normU = (flatX - m_flatCentroidX) / m_flatRangeX;
     Float normV = (flatY - m_flatCentroidY) / m_flatRangeY;
 
     Float u = m_anchorU + normU;
     Float v = m_anchorV + normV;
 
-    // Wrap to [0..1].
-    u = u - std::floor(u);
-    v = v - std::floor(v);
+    // Clamp to [0..1] (don't wrap -- wrapping causes duplication). Points
+    // outside [0..1] are simply clipped by the rasterizer's UV clipping.
+    if (u < 0.0) u = 0.0; else if (u > 1.0) u = 1.0;
+    if (v < 0.0) v = 0.0; else if (v > 1.0) v = 1.0;
 
     return { u, v };
 }

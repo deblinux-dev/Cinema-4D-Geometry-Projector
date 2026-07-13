@@ -4,7 +4,8 @@
 #include "projection_tag.h"
 #include "description/Tprojectionsettings.h"
 #include "customgui_inexclude.h"
-#include "c4d_libs/lib_splinehelp.h"
+#include "c4d_general.h"
+#include "c4d_basedocument.h"
 #include <cmath>
 
 void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
@@ -79,10 +80,14 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     }
 
     // For spline objects (editable OR parametric like Circle/Rectangle/Arc):
-    // Use SplineHelp which reliably builds an interpolated LineObject for
-    // BOTH editable and parametric spline primitives. This is the most robust
-    // approach -- GetRealSpline() returns nullptr for primitives, and the
-    // cache may be empty on first eval, but SplineHelp always produces points.
+    //  - Editable splines store points directly on the object
+    //  - Parametric spline primitives have NO points on the object; their
+    //    geometry is generated in the cache. GetRealSpline() returns nullptr
+    //    for them, and SplineHelp also fails because there are no control
+    //    points. The ONLY reliable way to get their points is
+    //    SendModelingCommand(MCOMMAND_CURRENTSTATETOOBJECT), which forces
+    //    C4D to evaluate and convert the primitive into a real SplineObject
+    //    with interpolated points.
     if (obj->IsInstanceOf(Ospline))
     {
         SplineObject* splineObj = static_cast<SplineObject*>(obj);
@@ -94,40 +99,38 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
             return;
         }
 
-        // Parametric spline (Circle, Rectangle, Arc...): build a SplineHelp to
-        // force interpolation and get a LineObject with real points.
-        // RETAINLINEOBJECT is required for GetLineObject() to return a valid
-        // object; GLOBALSPACE gives points in world coordinates.
-        // SplineHelp has a private constructor, so we must use Alloc/Free.
-        SplineHelp* sh = SplineHelp::Alloc();
-        if (sh)
+        // Parametric spline: use SendModelingCommand to convert to a real
+        // SplineObject with interpolated points. This is the most reliable
+        // method -- it works regardless of cache state.
+        if (doc)
         {
-            if (sh->InitSpline(splineObj, SPLINEHELPFLAGS::GLOBALSPACE | SPLINEHELPFLAGS::RETAINLINEOBJECT))
+            ModelingCommandData mcd;
+            mcd.doc = doc;
+            mcd.op = obj;
+            mcd.mode = MODELINGCOMMANDMODE::ALL;
+            if (SendModelingCommand(MCOMMAND_CURRENTSTATETOOBJECT, mcd) && mcd.result)
             {
-                LineObject* lineObj = sh->GetLineObject();
-                if (lineObj && lineObj->GetPointCount() >= 2)
+                // The result array contains the converted object(s).
+                for (Int32 ri = 0; ri < mcd.result->GetCount(); ri++)
                 {
-                    SplineObject* realSpline = SplineObject::Alloc(lineObj->GetPointCount(), SPLINETYPE::LINEAR);
-                    if (realSpline)
+                    C4DAtom* atom = mcd.result->GetIndex(ri);
+                    if (!atom) continue;
+                    BaseObject* resultObj = static_cast<BaseObject*>(atom);
+                    if (resultObj->IsInstanceOf(Ospline))
                     {
-                        const Vector* linePts = lineObj->GetPointR();
-                        Vector* splinePts = realSpline->GetPointW();
-                        if (linePts && splinePts)
+                        SplineObject* realSpline = static_cast<SplineObject*>(resultObj);
+                        if (realSpline->GetPointCount() >= 2)
                         {
-                            for (Int32 i = 0; i < lineObj->GetPointCount(); i++)
-                                splinePts[i] = linePts[i];
-                            // Points are in global space (GLOBALSPACE flag), so use
-                            // an identity matrix for CollectSpline.
-                            CollectSpline(realSpline, Matrix(), splineSubdiv);
-                            SplineObject::Free(realSpline);
-                            SplineHelp::Free(sh);
-                            return;
+                            // The converted spline's points are in the object's
+                            // local space. Use the original object's world matrix.
+                            CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
                         }
-                        SplineObject::Free(realSpline);
                     }
+                    // Free the result objects (they're temporary copies).
+                    BaseObject::Free(resultObj);
                 }
+                return;
             }
-            SplineHelp::Free(sh);
         }
 
         // Fallback: walk the cache (deform > generator) to find the
