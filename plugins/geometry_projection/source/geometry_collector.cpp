@@ -4,8 +4,6 @@
 #include "projection_tag.h"
 #include "description/Tprojectionsettings.h"
 #include "customgui_inexclude.h"
-#include "c4d_general.h"
-#include "c4d_basedocument.h"
 #include <cmath>
 
 void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
@@ -82,12 +80,10 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     // For spline objects (editable OR parametric like Circle/Rectangle/Arc):
     //  - Editable splines store points directly on the object
     //  - Parametric spline primitives have NO points on the object; their
-    //    geometry is generated in the cache. GetRealSpline() returns nullptr
-    //    for them, and SplineHelp also fails because there are no control
-    //    points. The ONLY reliable way to get their points is
-    //    SendModelingCommand(MCOMMAND_CURRENTSTATETOOBJECT), which forces
-    //    C4D to evaluate and convert the primitive into a real SplineObject
-    //    with interpolated points.
+    //    geometry lives in the CACHE as a generated Ospline. Walk the cache
+    //    (deform > generator > children) to find it. This works reliably --
+    //    SendModelingCommand cannot be used during GetVirtualObjects (C4D
+    //    forbids modeling commands during generator evaluation).
     if (obj->IsInstanceOf(Ospline))
     {
         SplineObject* splineObj = static_cast<SplineObject*>(obj);
@@ -99,47 +95,29 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
             return;
         }
 
-        // Parametric spline: use SendModelingCommand to convert to a real
-        // SplineObject with interpolated points. This is the most reliable
-        // method -- it works regardless of cache state.
-        if (doc)
-        {
-            ModelingCommandData mcd;
-            mcd.doc = doc;
-            mcd.op = obj;
-            mcd.mode = MODELINGCOMMANDMODE::ALL;
-            if (SendModelingCommand(MCOMMAND_CURRENTSTATETOOBJECT, mcd) && mcd.result)
-            {
-                // The result array contains the converted object(s).
-                for (Int32 ri = 0; ri < mcd.result->GetCount(); ri++)
-                {
-                    C4DAtom* atom = mcd.result->GetIndex(ri);
-                    if (!atom) continue;
-                    BaseObject* resultObj = static_cast<BaseObject*>(atom);
-                    if (resultObj->IsInstanceOf(Ospline))
-                    {
-                        SplineObject* realSpline = static_cast<SplineObject*>(resultObj);
-                        if (realSpline->GetPointCount() >= 2)
-                        {
-                            // The converted spline's points are in the object's
-                            // local space. Use the original object's world matrix.
-                            CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
-                        }
-                    }
-                    // Free the result objects (they're temporary copies).
-                    BaseObject::Free(resultObj);
-                }
-                return;
-            }
-        }
-
-        // Fallback: walk the cache (deform > generator) to find the
-        // generated Ospline.
+        // Parametric spline: walk the cache to find the generated Ospline.
+        // CollectFromCache recurses into children/sub-caches and uses
+        // IsInstanceOf(Ospline), so it finds the real spline wherever C4D
+        // put it. This is the same path that works when a Connect generator
+        // is used above the spline.
         BaseObject* cache = GetBestCache(obj);
         if (cache)
         {
             CollectFromCache(cache, obj->GetMg(), doc, splineSubdiv);
             return;
+        }
+
+        // If no cache yet, try walking children directly (some parametric
+        // splines store their geometry as a child rather than in GetCache()).
+        BaseObject* child = obj->GetDown();
+        while (child)
+        {
+            if (child->IsInstanceOf(Ospline) && child->GetPointCount() >= 2)
+            {
+                CollectSpline(static_cast<SplineObject*>(child), obj->GetMg(), splineSubdiv);
+                return;
+            }
+            child = child->GetNext();
         }
         return;
     }

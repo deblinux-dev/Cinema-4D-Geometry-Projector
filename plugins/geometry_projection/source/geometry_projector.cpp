@@ -389,6 +389,81 @@ static bool PointInAnyPoly(Float x, Float y,
     return false;
 }
 
+// Clip a line segment against a convex polygon (Liang-Barsky against each edge).
+// Returns true if any part of the segment is inside; u0/v0/u1/v1 are modified
+// to contain the clipped segment. For non-convex polys this is an approximation.
+static bool ClipLineVsPoly(Float& u0, Float& v0, Float& u1, Float& v1,
+                            const std::vector<std::pair<Float,Float>>& clip)
+{
+    if (clip.size() < 3) return false;
+    // First check if both endpoints are inside -- no clipping needed.
+    auto pointInPoly = [&](Float x, Float y) -> bool {
+        Int32 n = (Int32)clip.size();
+        bool inside = false;
+        for (Int32 i = 0, j = n - 1; i < n; j = i++)
+        {
+            Float xi = clip[i].first,  yi = clip[i].second;
+            Float xj = clip[j].first,  yj = clip[j].second;
+            if (((yi > y) != (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / ((yj - yi) != 0.0 ? (yj - yi) : 1e-10) + xi))
+                inside = !inside;
+        }
+        return inside;
+    };
+
+    bool in0 = pointInPoly(u0, v0);
+    bool in1 = pointInPoly(u1, v1);
+    if (in0 && in1) return true; // fully inside
+
+    // Clip against each edge using Cyrus-Beck algorithm.
+    Float du = u1 - u0;
+    Float dv = v1 - v0;
+    Float tE = 0.0, tL = 1.0; // entry and exit parameters
+    Int32 n = (Int32)clip.size();
+    for (Int32 i = 0; i < n; i++)
+    {
+        Int32 j = (i + 1) % n;
+        Float ex = clip[j].first - clip[i].first;
+        Float ey = clip[j].second - clip[i].second;
+        // outward normal (for CCW polygon): (ey, -ex)
+        Float nx = ey;
+        Float ny = -ex;
+        // vector from edge start to segment start
+        Float wx = u0 - clip[i].first;
+        Float wy = v0 - clip[i].second;
+        Float denom = nx * du + ny * dv; // dot(N, D)
+        Float num  = nx * wx + ny * wy;  // dot(N, W)
+        if (std::abs(denom) < 1e-10)
+        {
+            // Segment parallel to edge. If outside, reject entirely.
+            if (num < 0.0) return false;
+        }
+        else
+        {
+            Float t = -num / denom;
+            if (denom < 0.0)
+            {
+                // entering
+                if (t > tE) tE = t;
+            }
+            else
+            {
+                // exiting
+                if (t < tL) tL = t;
+            }
+        }
+    }
+    if (tE > tL) return false; // segment entirely outside
+    // Compute clipped endpoints
+    Float nu0 = u0 + tE * du;
+    Float nv0 = v0 + tE * dv;
+    Float nu1 = u0 + tL * du;
+    Float nv1 = v0 + tL * dv;
+    u0 = nu0; v0 = nv0;
+    u1 = nu1; v1 = nv1;
+    return true;
+}
+
 void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
 {
     // Nothing to do if no clip sources were recorded.
@@ -506,9 +581,10 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
             }
             proj.closedSplines = std::move(newSp);
 
-            // 3. Clip lines: keep a segment only if at least one endpoint is
-            // inside the silhouette. (Full segment clipping would be more
-            // accurate but this is simple and visually adequate for outlines.)
+            // 3. Clip lines: clip each segment AGAINST the silhouette polygon
+            // (not just test endpoints). A segment from inside to outside is
+            // clipped at the boundary so nothing draws beyond it. This prevents
+            // the chaotic cross-lines that appeared when moving clipped objects.
             std::vector<CollectedLine> newLines;
             newLines.reserve(proj.lines.size());
             for (const auto& line : proj.lines)
@@ -519,10 +595,30 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
                     continue;
                 const auto& p0 = proj.points2d[line.v0];
                 const auto& p1 = proj.points2d[line.v1];
-                bool in0 = PointInAnyPoly(p0.first, p0.second, sil);
-                bool in1 = PointInAnyPoly(p1.first, p1.second, sil);
-                if (in0 || in1)
-                    newLines.push_back(line);
+
+                // Clip the segment against each silhouette polygon. Keep the
+                // first non-empty result (typical single-boundary case).
+                bool clipped = false;
+                for (const auto& cp : sil)
+                {
+                    Float u0 = p0.first, v0 = p0.second;
+                    Float u1 = p1.first, v1 = p1.second;
+                    if (ClipLineVsPoly(u0, v0, u1, v1, cp))
+                    {
+                        // The segment (or part of it) is inside this clip poly.
+                        // Create a new line with the clipped endpoints.
+                        CollectedLine nl = line;
+                        Int32 base = (Int32)proj.points2d.size();
+                        proj.points2d.push_back({u0, v0});
+                        proj.points2d.push_back({u1, v1});
+                        nl.v0 = base;
+                        nl.v1 = base + 1;
+                        newLines.push_back(nl);
+                        clipped = true;
+                        break; // first non-empty result is enough
+                    }
+                }
+                // If no clip poly intersected, the segment is fully outside -> discard.
             }
             proj.lines = std::move(newLines);
 
@@ -628,10 +724,11 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
     m_flatRangeX = targetDiam;
     m_flatRangeY = targetDiam;
 
-    // ---- Compute anchor UV from source center ray-cast ----
-    // Ray-cast from source center toward target center. The nearest hit gives
-    // the point on the target surface facing the source (the 'near side').
-    // This is where the decal's center sits on the UV map.
+    // ---- Compute anchor UV from multi-sample ray-cast ----
+    // Sample a 3x3 grid of points around the source center (in the flat
+    // projection plane) and ray-cast each. Use the MEDIAN UV (not average) --
+    // the median is immune to outliers when one sample crosses a polygon
+    // boundary or UV seam, giving a smooth anchor that doesn't jitter.
     m_anchorU = 0.5; m_anchorV = 0.5;
     {
         Vector localSrc = m_targetInvMg * sourceCenter;
@@ -642,23 +739,47 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
         {
             dir = dir / len;
             Float rayLen = len * 2.0 + 1000.0;
-            if (rc->Intersect(localSrc, dir, rayLen, false))
+
+            // Sample offsets in the flat plane (small fraction of source extent)
+            Float offX = m_flatRangeX * 0.05;
+            Float offY = m_flatRangeY * 0.05;
+            Vector offsets[9] = {
+                Vector(0,0,0),
+                Vector( offX, 0,0), Vector(-offX, 0,0),
+                Vector(0,  offY,0), Vector(0,-offY,0),
+                Vector( offX,  offY,0), Vector(-offX,  offY,0),
+                Vector( offX, -offY,0), Vector(-offX, -offY,0)
+            };
+
+            std::vector<Float> us, vs;
+            for (int s = 0; s < 9; s++)
             {
+                Vector samplePt = sourceCenter + m_flatRight * offsets[s].x + m_flatUp * offsets[s].y;
+                Vector localP = m_targetInvMg * samplePt;
+                if (!rc->Intersect(localP, dir, rayLen, false)) continue;
                 GeRayColResult res;
-                if (rc->GetNearestIntersection(&res) && res.face_id >= 0)
-                {
-                    UVWStruct us = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
-                    Float u = res.barrycoords.x;
-                    Float v = res.barrycoords.y;
-                    Bool secondHalf = (res.tri_face_id < 0);
-                    Vector uvw;
-                    if (!secondHalf)
-                        uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
-                    else
-                        uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
-                    m_anchorU = uvw.x;
-                    m_anchorV = uvw.y;
-                }
+                if (!rc->GetNearestIntersection(&res) || res.face_id < 0) continue;
+
+                UVWStruct ustr = static_cast<UVWTag*>(m_uvwTag)->GetSlow(res.face_id);
+                Float u = res.barrycoords.x;
+                Float v = res.barrycoords.y;
+                Bool secondHalf = (res.tri_face_id < 0);
+                Vector uvw;
+                if (!secondHalf)
+                    uvw = ustr.a + (ustr.b - ustr.a) * u + (ustr.c - ustr.a) * v;
+                else
+                    uvw = ustr.a + (ustr.c - ustr.a) * u + (ustr.d - ustr.a) * v;
+                us.push_back(uvw.x);
+                vs.push_back(uvw.y);
+            }
+
+            if (!us.empty())
+            {
+                // Median is more stable than average for filtering boundary jumps
+                std::sort(us.begin(), us.end());
+                std::sort(vs.begin(), vs.end());
+                m_anchorU = us[us.size() / 2];
+                m_anchorV = vs[vs.size() / 2];
             }
         }
     }
