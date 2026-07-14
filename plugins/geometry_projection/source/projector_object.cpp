@@ -232,14 +232,14 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
     ProjectionCache* cache = GetCache(op);
 
     if (dirty || !cache || !cache->rasterValid)
-        DoUpdate(op, doc);
+        DoUpdate(op, doc, hh);
 
     return BaseObject::Alloc(Onull);
 }
 
 // ==================== DoUpdate ====================
 
-void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
+void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc, HierarchyHelp* hh)
 {
     BaseContainer* data = op->GetDataInstance();
     if (!data) return;
@@ -293,7 +293,7 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc)
     if (level >= CacheUpdateLevel::GEOMETRY)
     {
         GeometryCollector collector;
-        collector.Collect(srcObjs, doc, settings.splineSubdivision,
+        collector.Collect(srcObjs, doc, hh, settings.splineSubdivision,
                       settings.fgColor, settings.lineWidth, settings.drawFill);
         cache->geometry           = collector.GetGeometry();
         cache->geometryValid      = true;
@@ -487,7 +487,7 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
     settings.previewResolution = renderW;
 
     GeometryCollector collector;
-    collector.Collect(srcObjs, doc, settings.splineSubdivision,
+    collector.Collect(srcObjs, doc, nullptr, settings.splineSubdivision,
                       settings.fgColor, settings.lineWidth, settings.drawFill);
 
     GeometryProjector projector;

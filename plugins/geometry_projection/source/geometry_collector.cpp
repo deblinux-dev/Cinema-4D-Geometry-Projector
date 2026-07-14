@@ -8,6 +8,7 @@
 
 void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
                                  BaseDocument* doc,
+                                 HierarchyHelp* hh,
                                  Int32 splineSubdiv,
                                  Vector defaultColor,
                                  Float defaultThickness,
@@ -17,6 +18,7 @@ void GeometryCollector::Collect(const std::vector<BaseObject*>& objects,
     m_defaultColor     = defaultColor;
     m_defaultThickness = defaultThickness;
     m_defaultFill      = defaultFill;
+    m_hh               = hh;
 
     for (BaseObject* obj : objects)
     {
@@ -78,12 +80,11 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
     }
 
     // For spline objects (editable OR parametric like Circle/Rectangle/Arc):
-    //  - Editable splines store points directly on the object
-    //  - Parametric spline primitives have NO points on the object; their
-    //    geometry lives in the CACHE as a generated Ospline. Walk the cache
-    //    (deform > generator > children) to find it. This works reliably --
-    //    SendModelingCommand cannot be used during GetVirtualObjects (C4D
-    //    forbids modeling commands during generator evaluation).
+    // Use GetVirtualLineObject which is the official API for getting a
+    // LineObject (interpolated points) from ANY spline -- editable or
+    // parametric primitive. It requires HierarchyHelp from GetVirtualObjects.
+    // This is the ONLY reliable way to get points from parametric spline
+    // primitives during generator evaluation.
     if (obj->IsInstanceOf(Ospline))
     {
         SplineObject* splineObj = static_cast<SplineObject*>(obj);
@@ -95,33 +96,35 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
             return;
         }
 
-        // Parametric spline: walk the cache to find the generated Ospline.
-        // CollectFromCache recurses into children/sub-caches and uses
-        // IsInstanceOf(Ospline), so it finds the real spline wherever C4D
-        // put it. This is the same path that works when a Connect generator
-        // is used above the spline.
+        // Parametric spline: use GetVirtualLineObject to force interpolation.
+        // keep_spline=false returns a LineObject with dense interpolated points.
+        // recurse=true searches children/caches if the object itself has no line.
+        if (m_hh)
+        {
+            Matrix mres;
+            Bool dirty = false;
+            BaseObject* lineObj = GetVirtualLineObject(obj, m_hh, obj->GetMl(), false, true, &mres, &dirty);
+            if (lineObj && lineObj->IsInstanceOf(Ospline))
+            {
+                SplineObject* realSpline = static_cast<SplineObject*>(lineObj);
+                if (realSpline->GetPointCount() >= 2)
+                {
+                    // GetVirtualLineObject returns points in the object's local
+                    // space. Use the object's world matrix.
+                    CollectSpline(realSpline, obj->GetMg(), splineSubdiv);
+                    return;
+                }
+            }
+            // Note: GetVirtualLineObject returns a borrowed reference (owned by
+            // the cache), so we do NOT free it.
+        }
+
+        // Fallback: walk the cache.
         BaseObject* cache = GetBestCache(obj);
         if (cache)
         {
             CollectFromCache(cache, obj->GetMg(), doc, splineSubdiv);
             return;
-        }
-
-        // If no cache yet, try walking children directly (some parametric
-        // splines store their geometry as a child rather than in GetCache()).
-        BaseObject* child = obj->GetDown();
-        while (child)
-        {
-            if (child->IsInstanceOf(Ospline))
-            {
-                SplineObject* childSpline = static_cast<SplineObject*>(child);
-                if (childSpline->GetPointCount() >= 2)
-                {
-                    CollectSpline(childSpline, obj->GetMg(), splineSubdiv);
-                    return;
-                }
-            }
-            child = child->GetNext();
         }
         return;
     }
@@ -248,7 +251,7 @@ void GeometryCollector::CollectPolygonObject(PolygonObject* polyObj, const Matri
             std::pair<Int32,Int32> edge = (p0 < p1) ? std::make_pair(p0, p1)
                                                      : std::make_pair(p1, p0);
             if (edgeSet.insert(edge).second)
-                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness, false, m_currentOwner });
+                m_geometry.lines.push_back({ p0, p1, m_currentColor, m_currentThickness, false, true, m_currentOwner });
         };
 
         addEdge(a, b);
@@ -326,11 +329,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
 
             for (Int32 i = 0; i < segPointCount - 1; i++)
                 m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
-                                             m_currentColor, m_currentThickness, true, m_currentOwner });
+                                             m_currentColor, m_currentThickness, true, false, m_currentOwner });
 
             if (closed)
                 m_geometry.lines.push_back({ baseIdx + segPointCount - 1, baseIdx,
-                                             m_currentColor, m_currentThickness, true, m_currentOwner });
+                                             m_currentColor, m_currentThickness, true, false, m_currentOwner });
         }
         else
         {
@@ -346,11 +349,11 @@ void GeometryCollector::CollectSpline(SplineObject* splineObj, const Matrix& wor
 
             for (Int32 i = 0; i < totalSamples - 1; i++)
                 m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
-                                             m_currentColor, m_currentThickness, true, m_currentOwner });
+                                             m_currentColor, m_currentThickness, true, false, m_currentOwner });
 
             if (closed)
                 m_geometry.lines.push_back({ baseIdx + totalSamples - 1, baseIdx,
-                                             m_currentColor, m_currentThickness, true, m_currentOwner });
+                                             m_currentColor, m_currentThickness, true, false, m_currentOwner });
         }
 
         if (closed)

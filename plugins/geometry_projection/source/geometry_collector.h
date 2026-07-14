@@ -12,8 +12,10 @@
 
 // A line segment with per-object color and thickness.
 // isSpline marks segments that belong to a spline (vs polygon edges). Spline
-// segments get round caps at EVERY vertex to avoid gaps at corners, which
-// otherwise make the spline look unevenly thick at turns.
+// segments get round caps at EVERY vertex to avoid gaps at corners.
+// isPolygonEdge marks edges that come from polygon topology (vs spline).
+// The rasterizer uses this to distinguish 'silhouette' (boundary edges) from
+// 'all edges' for the 3 draw modes.
 // ownerObj identifies which source object this line came from (used for the
 // clipping pass: lines of an object are clipped against its clip source's
 // projected silhouette).
@@ -22,8 +24,9 @@ struct CollectedLine
     Int32  v0, v1;
     Vector color;
     Float  thickness;
-    Bool   isSpline = false;
-    BaseObject* ownerObj = nullptr;
+    Bool   isSpline       = false;
+    Bool   isPolygonEdge  = false;
+    BaseObject* ownerObj  = nullptr;
 };
 
 // A polygon (triangle or quad) with per-object color and fill override.
@@ -70,12 +73,15 @@ public:
     // Collect geometry from a list of objects.
     // objects         -- source BaseObject* list (from InExcludeData)
     // doc             -- active document
+    // hh              -- HierarchyHelp from GetVirtualObjects (needed for
+    //                    GetVirtualLineObject on parametric spline primitives)
     // splineSubdiv    -- interpolation steps per spline segment
     // defaultColor    -- color to use when an object has no ProjectionSettingsTag
     //                     with color override
     // defaultThickness -- line thickness when no tag override
     // defaultFill     -- global Draw Fill setting (used when no tag override)
     void Collect(const std::vector<BaseObject*>& objects, BaseDocument* doc,
+                 HierarchyHelp* hh,
                  Int32 splineSubdiv, Vector defaultColor, Float defaultThickness,
                  Bool defaultFill);
 
@@ -95,6 +101,8 @@ private:
     Vector m_defaultColor     = Vector(1, 1, 1);
     Float  m_defaultThickness = 2.0;
     Bool   m_defaultFill      = false;
+
+    HierarchyHelp* m_hh = nullptr;  // from GetVirtualObjects, for GetVirtualLineObject
 
     // Walk one object, resolve tag settings, find the best cache, collect geometry
     void CollectObject(BaseObject* obj, BaseDocument* doc, Int32 splineSubdiv);

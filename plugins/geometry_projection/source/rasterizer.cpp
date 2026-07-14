@@ -236,73 +236,93 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         ScanlineFill(corners, r, g, b, alpha);
     }
 
-    // 2. Polygon outlines (per-object color, global thickness)
-    if (settings.drawOutline)
+    // 2. Draw edges. Two modes:
+    //   - drawOutline = false (silhouette mode): draw only BOUNDARY edges
+    //     (polygon edges belonging to exactly 1 polygon) + spline segments.
+    //     This gives a clean outline without internal mesh lines.
+    //   - drawOutline = true (all-edges mode): draw ALL polygon edges +
+    //     spline segments. Useful for wireframe-style effects.
+    // Boundary edges are computed by counting how many polygons share each
+    // edge (sorted vertex pair). Edges with count == 1 are boundary.
     {
-        Float outThick = settings.scaledOutlineWidth;
+        // Build edge -> polygon count map from projected polygons.
+        std::map<std::pair<Int32,Int32>, Int32> edgePolyCount;
         for (const auto& poly : projected.polygons)
         {
             Int32 n = (Int32)poly.indices.size();
-            if (n < 2) continue;
-            auto [r, g, b] = to255(poly.color);
             for (Int32 i = 0; i < n; i++)
             {
-                Int32 ia = poly.indices[i];
-                Int32 ib = poly.indices[(i + 1) % n];
-                if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
-
-                // UV-clip the outline segment to [0..1] so it doesn't draw
-                // a strip at the bitmap edge when the polygon extends outside
-                // the target object's bounds.
-                Float u0 = projected.points2d[ia].first;
-                Float v0 = projected.points2d[ia].second;
-                Float u1 = projected.points2d[ib].first;
-                Float v1 = projected.points2d[ib].second;
-                if (!CS_ClipLine(u0, v0, u1, v1)) continue;
-
-                DrawThickLine(UtoX(u0), VtoY(1.0 - v0),
-                               UtoX(u1), VtoY(1.0 - v1),
-                               r, g, b, alpha, outThick, false, false);
+                Int32 a = poly.indices[i];
+                Int32 b = poly.indices[(i + 1) % n];
+                auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
+                edgePolyCount[key]++;
             }
         }
-    }
 
-    // 3. Edge lines with caps (per-object color and thickness)
-    std::map<Int32, Int32> pointConnections;
-    for (const auto& line : projected.lines)
-    {
-        pointConnections[line.v0]++;
-        pointConnections[line.v1]++;
-    }
+        // Count connections per point (for cap decision).
+        std::map<Int32, Int32> pointConnections;
+        for (const auto& line : projected.lines)
+        {
+            pointConnections[line.v0]++;
+            pointConnections[line.v1]++;
+        }
 
-    for (const auto& line : projected.lines)
-    {
-        Int32 ia = line.v0;
-        Int32 ib = line.v1;
-        if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
+        for (const auto& line : projected.lines)
+        {
+            Int32 ia = line.v0;
+            Int32 ib = line.v1;
+            if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
 
-        // UV-clip the line to [0..1] to avoid edge strips
-        Float u0 = projected.points2d[ia].first;
-        Float v0 = projected.points2d[ia].second;
-        Float u1 = projected.points2d[ib].first;
-        Float v1 = projected.points2d[ib].second;
-        if (!CS_ClipLine(u0, v0, u1, v1)) continue;
+            // Determine if this line should be drawn in the current mode.
+            bool drawThisLine = false;
+            if (line.isSpline)
+            {
+                // Spline segments are always drawn (they ARE the silhouette).
+                drawThisLine = true;
+            }
+            else if (line.isPolygonEdge)
+            {
+                // Polygon edge: check if it's a boundary edge.
+                auto key = (ia < ib) ? std::make_pair(ia, ib) : std::make_pair(ib, ia);
+                Int32 cnt = edgePolyCount[key];
+                if (settings.drawOutline)
+                {
+                    // All-edges mode: draw all polygon edges.
+                    drawThisLine = true;
+                }
+                else
+                {
+                    // Silhouette mode: draw only boundary edges (cnt == 1).
+                    drawThisLine = (cnt <= 1);
+                }
+            }
+            else
+            {
+                // Non-polygon, non-spline line: always draw (shouldn't happen).
+                drawThisLine = true;
+            }
 
-        auto [r, g, b] = to255(line.color);
-        Float thick = settings.ScaleLineWidth(line.thickness, m_width);
+            if (!drawThisLine) continue;
 
-        // Caps: always draw round caps at endpoints (connection count == 1).
-        // For SPLINE segments, also draw caps at intermediate vertices
-        // (connection count == 2). Without this, the angle between two
-        // consecutive spline segments creates a gap on the outer side of a
-        // turn, making the spline look unevenly thick. Round caps fill those
-        // gaps and give a consistent thickness along the whole spline.
-        bool capA = (pointConnections[ia] == 1) || line.isSpline;
-        bool capB = (pointConnections[ib] == 1) || line.isSpline;
+            // UV-clip the line to [0..1] to avoid edge strips
+            Float u0 = projected.points2d[ia].first;
+            Float v0 = projected.points2d[ia].second;
+            Float u1 = projected.points2d[ib].first;
+            Float v1 = projected.points2d[ib].second;
+            if (!CS_ClipLine(u0, v0, u1, v1)) continue;
 
-        DrawThickLine(UtoX(u0), VtoY(1.0 - v0),
-                       UtoX(u1), VtoY(1.0 - v1),
-                       r, g, b, alpha, thick, capA, capB);
+            auto [r, g, b] = to255(line.color);
+            Float thick = settings.ScaleLineWidth(line.thickness, m_width);
+
+            // Caps: round caps at endpoints (connection count == 1).
+            // For spline segments, caps at every vertex to fill corner gaps.
+            bool capA = (pointConnections[ia] == 1) || line.isSpline;
+            bool capB = (pointConnections[ib] == 1) || line.isSpline;
+
+            DrawThickLine(UtoX(u0), VtoY(1.0 - v0),
+                           UtoX(u1), VtoY(1.0 - v1),
+                           r, g, b, alpha, thick, capA, capB);
+        }
     }
 
     return Flush();

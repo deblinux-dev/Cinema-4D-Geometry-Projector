@@ -43,7 +43,7 @@ public:
 private:
     Int64 m_cacheId = 0;
 
-    void DoUpdate(BaseObject* op, BaseDocument* doc);
+    void DoUpdate(BaseObject* op, BaseDocument* doc, HierarchyHelp* hh);
 
     std::vector<BaseObject*> GetSourceObjects(BaseObject* op, BaseDocument* doc);
 
