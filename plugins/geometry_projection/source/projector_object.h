@@ -53,6 +53,11 @@ private:
     void CreateShader(BaseObject* op, BaseDocument* doc);
     void BakeToFile(BaseObject* op, BaseDocument* doc);
 
+    // UV-follow helper: sets up GeRayCollider + UVWTag from the target object,
+    // then calls Rasterizer::RasterizeUVFollow. Returns nullptr on failure.
+    BaseBitmap* RasterizeUVFollowBitmap(BaseObject* op, const ProjectionSettings& settings,
+                                         const CollectedGeometry& geometry);
+
     ProjectionCache* GetCache(BaseObject* op);
 
     void DrawBounds(BaseObject* op, BaseDraw* bd, BaseDrawHelp* bh);

@@ -6,6 +6,8 @@
 
 #include "customgui_inexclude.h"
 #include "c4d_basedocument.h"
+#include "c4d_basetag.h"
+#include "c4d_libs/lib_collider.h"
 #include "projection_shader.h"
 
 // ---- Find the ProjectionShader inside a material (recursive) ----
@@ -312,8 +314,20 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc, Hierar
 
     if (level >= CacheUpdateLevel::RASTER)
     {
-        Rasterizer rasterizer;
-        BaseBitmap* newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
+        BaseBitmap* newBitmap = nullptr;
+
+        if (settings.projMode == PROJ_MODE_UVFOLLOW)
+        {
+            // UV-follow: two-stage pixel projection (orthographic render +
+            // per-pixel ray-cast to target UV). This bypasses the normal
+            // Project + Rasterize pipeline entirely.
+            newBitmap = RasterizeUVFollowBitmap(op, settings, cache->geometry);
+        }
+        else
+        {
+            Rasterizer rasterizer;
+            newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
+        }
 
         cache->SetBitmap(newBitmap);
         cache->rasterHash  = rasterHash;
@@ -358,6 +372,57 @@ Int32 GeometryProjectorObject::GetResolutionFromParam(Int32 paramValue)
         case PREVIEW_RES_2048: return 2048;
         default:               return 256;
     }
+}
+
+// ==================== UV Follow bitmap ====================
+
+BaseBitmap* GeometryProjectorObject::RasterizeUVFollowBitmap(BaseObject* op,
+                                                                const ProjectionSettings& settings,
+                                                                const CollectedGeometry& geometry)
+{
+    if (!settings.targetSurfaceObj) return nullptr;
+
+    // Find the polygon object (walk cache if target is a generator)
+    BaseObject* surfObj = settings.targetSurfaceObj;
+    if (!surfObj->IsInstanceOf(Opolygon))
+    {
+        BaseObject* cache = surfObj->GetCache();
+        while (cache && !cache->IsInstanceOf(Opolygon))
+            cache = cache->GetCache();
+        if (!cache)
+        {
+            cache = surfObj->GetDown();
+            while (cache && !cache->IsInstanceOf(Opolygon))
+                cache = cache->GetNext();
+        }
+        if (cache) surfObj = cache;
+        else return nullptr;
+    }
+    if (!surfObj->IsInstanceOf(Opolygon)) return nullptr;
+
+    // Find UVW tag
+    BaseTag* tag = surfObj->GetTag(Tuvw);
+    if (!tag) return nullptr;
+    UVWTag* uvwTag = static_cast<UVWTag*>(tag);
+
+    // Build ray collider
+    GeRayCollider* rc = GeRayCollider::Alloc();
+    if (!rc) return nullptr;
+    if (!rc->Init(surfObj, true))
+    {
+        GeRayCollider::Free(rc);
+        return nullptr;
+    }
+
+    Matrix mg = surfObj->GetMg();
+    Matrix invMg = ~mg;
+    Vector targetCenter = mg * surfObj->GetMp();
+
+    Rasterizer rasterizer;
+    BaseBitmap* bm = rasterizer.RasterizeUVFollow(geometry, settings, rc, uvwTag,
+                                                    invMg, targetCenter);
+    GeRayCollider::Free(rc);
+    return bm;
 }
 
 ProjectionCache* GeometryProjectorObject::GetCache(BaseObject* op)
@@ -494,8 +559,16 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
     ProjectedGeometry projected;
     projector.Project(collector.GetGeometry(), settings, projected);
 
-    Rasterizer rasterizer;
-    BaseBitmap* bitmap = rasterizer.Rasterize(projected, collector.GetGeometry(), settings);
+    BaseBitmap* bitmap = nullptr;
+    if (settings.projMode == PROJ_MODE_UVFOLLOW)
+    {
+        bitmap = RasterizeUVFollowBitmap(op, settings, collector.GetGeometry());
+    }
+    else
+    {
+        Rasterizer rasterizer;
+        bitmap = rasterizer.Rasterize(projected, collector.GetGeometry(), settings);
+    }
     if (!bitmap)
     {
         MessageDialog("Rasterization failed."_s);

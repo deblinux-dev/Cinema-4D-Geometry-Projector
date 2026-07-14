@@ -6,6 +6,10 @@
 #include "geometry_collector.h"
 #include <vector>
 
+// Forward declarations for UV-follow ray casting
+class GeRayCollider;
+class UVWTag;
+
 class Rasterizer
 {
 public:
@@ -14,6 +18,21 @@ public:
     BaseBitmap* Rasterize(const ProjectedGeometry& projected,
                            const CollectedGeometry& collected,
                            const ProjectionSettings& settings);
+
+    // UV-follow two-stage pixel projection:
+    //  Stage 1: orthographically render source geometry onto a plane
+    //           perpendicular to source->target direction → temp bitmap
+    //  Stage 2: for each filled pixel, ray-cast to target surface, sample UV,
+    //           write color to the final bitmap at that UV position.
+    // This produces a clean, undistorted silhouette that is seamless across
+    // UV seams and doesn't jitter (no anchor UV dependency).
+    // rayCollider must be pre-initialized with the target polygon object.
+    BaseBitmap* RasterizeUVFollow(const CollectedGeometry& collected,
+                                    const ProjectionSettings& settings,
+                                    GeRayCollider* rayCollider,
+                                    UVWTag* uvwTag,
+                                    const Matrix& targetInvMg,
+                                    const Vector& targetCenter);
 
 private:
     Int32 m_width  = 0;
