@@ -58,6 +58,13 @@ private:
     BaseBitmap* RasterizeUVFollowBitmap(BaseObject* op, const ProjectionSettings& settings,
                                          const CollectedGeometry& geometry);
 
+    // UV-follow Approach A: build a UV→3D lookup table for the target surface.
+    // For each UV pixel, finds the containing polygon and computes the 3D
+    // world position via barycentric interpolation. Uses a UV grid for fast
+    // polygon lookup. Stored in cache->uvFollowLookup.
+    void BuildUVFollowLookup(BaseObject* op, const ProjectionSettings& settings,
+                              ProjectionCache* cache);
+
     ProjectionCache* GetCache(BaseObject* op);
 
     void DrawBounds(BaseObject* op, BaseDraw* bd, BaseDrawHelp* bh);

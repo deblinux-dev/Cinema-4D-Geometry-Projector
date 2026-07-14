@@ -65,6 +65,16 @@ struct ProjectionCache
     // Incremented each time the bitmap is replaced; read by shader in InitRender
     std::atomic<Int32> version{0};
 
+    // UV-follow precomputed lookup: for each UV pixel, the 3D world position
+    // on the target surface. Built once when the target changes (Approach A).
+    // The rasterizer uses this to avoid per-pixel ray-casting: instead of
+    // ray-casting each source pixel to the target, it looks up the 3D position
+    // for each UV pixel and projects it onto the source plane.
+    std::vector<Vector> uvFollowLookup;
+    Bool                uvFollowLookupValid = false;
+    UInt32              uvFollowTargetDirty = 0;
+    Int32               uvFollowResolution  = 0;
+
     ProjectionCache() {}
     ~ProjectionCache() { FreeBitmap(); }
 

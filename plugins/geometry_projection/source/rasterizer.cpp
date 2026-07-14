@@ -434,42 +434,31 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
 }
 
 
-// ==================== UV Follow (two-stage pixel projection) ====================
 
-// Stage 1 helper: orthographically render source geometry onto a plane.
-// Fills tempRgba (4 bytes per pixel: R,G,B,A), tempWorldPos (3 Float per pixel),
-// and tempFilled (1 byte per pixel, 0/1).
-struct UVFollowTempData
+// ==================== UV Follow (Approach A: UV→3D lookup + orthographic source) ====================
+
+BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& collected,
+                                                     const ProjectionSettings& settings,
+                                                     const std::vector<Vector>& uvFollowLookup,
+                                                     Int32 lookupResolution)
 {
-    std::vector<uint8_t> rgba;       // w*h*4
-    std::vector<Vector>  worldPos;   // w*h
-    std::vector<uint8_t> filled;     // w*h
-    Int32 w = 0, h = 0;
-};
-
-BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
-                                            const ProjectionSettings& settings,
-                                            GeRayCollider* rayCollider,
-                                            UVWTag* uvwTag,
-                                            const Matrix& targetInvMg,
-                                            const Vector& targetCenter)
-{
-    if (!rayCollider || !uvwTag) return nullptr;
-
     m_width  = settings.previewResolution;
     m_height = settings.previewResolution;
     m_settings = settings;
+    InitBuffers();
+
+    if (uvFollowLookup.empty() || lookupResolution <= 0) return Flush();
+
+    Int32 ptCount = (Int32)collected.points.size();
+    if (ptCount == 0) return Flush();
 
     // ---- Compute source center and flat projection basis ----
-    Int32 ptCount = (Int32)collected.points.size();
-    if (ptCount == 0) return nullptr;
-
     Vector sourceCenter(0);
     for (Int32 i = 0; i < ptCount; i++)
         sourceCenter += collected.points[i];
     sourceCenter /= (Float)ptCount;
 
-    Vector fwd = targetCenter - sourceCenter;
+    Vector fwd = settings.targetBoundsCenter - sourceCenter;
     Float fwdLen = fwd.GetLength();
     if (fwdLen < 1e-7) fwd = Vector(0, 0, 1);
     else fwd = fwd / fwdLen;
@@ -481,7 +470,7 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
     Vector up = Cross(fwd, right);
     up.Normalize();
 
-    // ---- Compute source bounds on the plane ----
+    // ---- Source bounds on the plane ----
     Float srcMinX =  std::numeric_limits<Float>::max();
     Float srcMinY =  std::numeric_limits<Float>::max();
     Float srcMaxX = -std::numeric_limits<Float>::max();
@@ -496,7 +485,6 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         if (fy < srcMinY) srcMinY = fy;
         if (fy > srcMaxY) srcMaxY = fy;
     }
-    // Add small padding so silhouette isn't clipped at bitmap edge
     Float padX = (srcMaxX - srcMinX) * 0.05;
     Float padY = (srcMaxY - srcMinY) * 0.05;
     srcMinX -= padX; srcMaxX += padX;
@@ -506,128 +494,104 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
     if (rangeX < 1e-6) rangeX = 1.0;
     if (rangeY < 1e-6) rangeY = 1.0;
 
-    // ---- Stage 1: orthographic render onto temp bitmap ----
-    UVFollowTempData tmp;
-    tmp.w = m_width;
-    tmp.h = m_height;
-    tmp.rgba.assign((size_t)m_width * m_height * 4, 0);
-    tmp.worldPos.assign((size_t)m_width * m_height, Vector(0));
-    tmp.filled.assign((size_t)m_width * m_height, 0);
+    // ---- Stage 1: render source orthographically onto temp bitmap ----
+    Int32 tw = m_width, th = m_height;
+    std::vector<uint8_t> tempRgba((size_t)tw * th * 4, 0);
+    std::vector<uint8_t> tempFilled((size_t)tw * th, 0);
 
     Int32 alpha = ClampI((Int32)(settings.opacity * 255.0), 0, 255);
 
-    // Helper: world->plane coords
     auto toPlane = [&](const Vector& wp, Float& px, Float& py) {
         Vector d = wp - sourceCenter;
         px = Dot(d, right);
         py = Dot(d, up);
     };
-    // Helper: plane coords -> temp bitmap pixel
-    auto toTempPixel = [&](Float px, Float py, Int32& tx, Int32& ty) {
-        tx = (Int32)((px - srcMinX) / rangeX * (m_width  - 1) + 0.5);
-        ty = (Int32)((py - srcMinY) / rangeY * (m_height - 1) + 0.5);
+    auto toTempX = [&](Float px) -> Int32 {
+        return (Int32)((px - srcMinX) / rangeX * (tw - 1) + 0.5);
     };
-    // Helper: temp bitmap pixel -> world position (inverse of toPlane+toTempPixel)
-    // This is the KEY fix: instead of interpolating worldPos from polygon edges
-    // (which was broken), we compute it directly from the pixel coordinates.
-    // Each pixel (tx,ty) maps to a specific point on the projection plane,
-    // whose world position is sourceCenter + right*planeX + up*planeY.
-    auto tempPixelToWorld = [&](Int32 tx, Int32 ty) -> Vector {
-        Float px = srcMinX + (Float)tx / (Float)(m_width  - 1) * rangeX;
-        Float py = srcMinY + (Float)ty / (Float)(m_height - 1) * rangeY;
-        return sourceCenter + right * px + up * py;
+    auto toTempY = [&](Float py) -> Int32 {
+        return (Int32)((py - srcMinY) / rangeY * (th - 1) + 0.5);
     };
-    // Helper: write a pixel to temp
     auto setTempPixel = [&](Int32 tx, Int32 ty, Int32 r, Int32 g, Int32 b, Int32 a) {
-        if (tx < 0 || tx >= m_width || ty < 0 || ty >= m_height) return;
-        size_t idx = (size_t)ty * m_width + tx;
-        tmp.rgba[idx * 4 + 0] = (uint8_t)r;
-        tmp.rgba[idx * 4 + 1] = (uint8_t)g;
-        tmp.rgba[idx * 4 + 2] = (uint8_t)b;
-        tmp.rgba[idx * 4 + 3] = (uint8_t)a;
-        tmp.worldPos[idx] = tempPixelToWorld(tx, ty);
-        tmp.filled[idx] = 1;
-    };
-    // Helper: temp bitmap scanline fill for a polygon
-    auto fillTempPoly = [&](const std::vector<std::pair<Int32,Int32>>& corners,
-                             Int32 r, Int32 g, Int32 b, Int32 a) {
-        if (corners.size() < 3) return;
-        Int32 minY = corners[0].second, maxY = corners[0].second;
-        for (size_t i = 1; i < corners.size(); i++) {
-            if (corners[i].second < minY) minY = corners[i].second;
-            if (corners[i].second > maxY) maxY = corners[i].second;
-        }
-        minY = ClampI(minY, 0, m_height - 1);
-        maxY = ClampI(maxY, 0, m_height - 1);
-        for (Int32 y = minY; y <= maxY; y++) {
-            std::vector<Int32> xs;
-            Int32 n = (Int32)corners.size();
-            for (Int32 i = 0; i < n; i++) {
-                Int32 j = (i + 1) % n;
-                Int32 ay = corners[i].second, by = corners[j].second;
-                Int32 ax = corners[i].first,  bx = corners[j].first;
-                if ((ay <= y && by > y) || (by <= y && ay > y)) {
-                    Int32 x = ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay));
-                    xs.push_back(x);
-                }
-            }
-            std::sort(xs.begin(), xs.end());
-            for (size_t k = 0; k + 1 < xs.size(); k += 2) {
-                for (Int32 x = xs[k]; x <= xs[k + 1]; x++) {
-                    setTempPixel(x, y, r, g, b, a);
-                }
-            }
-        }
+        if (tx < 0 || tx >= tw || ty < 0 || ty >= th) return;
+        size_t idx = (size_t)ty * tw + tx;
+        tempRgba[idx * 4 + 0] = (uint8_t)r;
+        tempRgba[idx * 4 + 1] = (uint8_t)g;
+        tempRgba[idx * 4 + 2] = (uint8_t)b;
+        tempRgba[idx * 4 + 3] = (uint8_t)a;
+        tempFilled[idx] = 1;
     };
 
-    // Render fills (if drawFill)
+    auto to255v = [](const Vector& c) -> std::tuple<Int32,Int32,Int32> {
+        return std::make_tuple(ClampI((Int32)(c.x * 255.0), 0, 255),
+                                ClampI((Int32)(c.y * 255.0), 0, 255),
+                                ClampI((Int32)(c.z * 255.0), 0, 255));
+    };
+
+    // Fill polygons
     auto shouldFill = [&](const CollectedPolygon& p) -> bool {
         if (p.fillOverride) return p.fill;
         return settings.drawFill;
     };
+    auto fillTempPoly = [&](const std::vector<std::pair<Int32,Int32>>& corners,
+                             Int32 r, Int32 g, Int32 b, Int32 a) {
+        if (corners.size() < 3) return;
+        Int32 n = (Int32)corners.size();
+        Int32 minY = corners[0].second, maxY = corners[0].second;
+        for (Int32 i = 1; i < n; i++) {
+            if (corners[i].second < minY) minY = corners[i].second;
+            if (corners[i].second > maxY) maxY = corners[i].second;
+        }
+        minY = ClampI(minY, 0, th - 1);
+        maxY = ClampI(maxY, 0, th - 1);
+        for (Int32 y = minY; y <= maxY; y++) {
+            std::vector<Int32> xs;
+            for (Int32 i = 0; i < n; i++) {
+                Int32 j = (i + 1) % n;
+                Int32 ay = corners[i].second, by = corners[j].second;
+                Int32 ax = corners[i].first,  bx = corners[j].first;
+                if ((ay <= y && by > y) || (by <= y && ay > y))
+                    xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
+            }
+            std::sort(xs.begin(), xs.end());
+            for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                Int32 x0 = ClampI(xs[k], 0, tw - 1);
+                Int32 x1 = ClampI(xs[k+1], 0, tw - 1);
+                for (Int32 x = x0; x <= x1; x++)
+                    setTempPixel(x, y, r, g, b, a);
+            }
+        }
+    };
+
     for (const auto& poly : collected.polygons) {
-        if ((Int32)poly.indices.size() < 3) continue;
-        if (!shouldFill(poly)) continue;
-        auto to255 = [](Float c) -> Int32 { return ClampI((Int32)(c * 255.0), 0, 255); };
-        Int32 r = to255(poly.color.x), g = to255(poly.color.y), b = to255(poly.color.z);
+        if ((Int32)poly.indices.size() < 3 || !shouldFill(poly)) continue;
+        auto [r, g, b] = to255v(poly.color);
         std::vector<std::pair<Int32,Int32>> corners;
-        corners.reserve(poly.indices.size());
         for (Int32 idx : poly.indices) {
             if (idx < 0 || idx >= ptCount) continue;
-            Float px, py;
-            toPlane(collected.points[idx], px, py);
-            Int32 tx, ty;
-            toTempPixel(px, py, tx, ty);
-            corners.push_back({tx, ty});
+            Float px, py; toPlane(collected.points[idx], px, py);
+            corners.push_back({toTempX(px), toTempY(py)});
         }
         fillTempPoly(corners, r, g, b, alpha);
     }
     for (const auto& sp : collected.closed_splines) {
-        if ((Int32)sp.indices.size() < 3) continue;
-        if (!shouldFill(sp)) continue;
-        auto to255 = [](Float c) -> Int32 { return ClampI((Int32)(c * 255.0), 0, 255); };
-        Int32 r = to255(sp.color.x), g = to255(sp.color.y), b = to255(sp.color.z);
+        if ((Int32)sp.indices.size() < 3 || !shouldFill(sp)) continue;
+        auto [r, g, b] = to255v(sp.color);
         std::vector<std::pair<Int32,Int32>> corners;
-        corners.reserve(sp.indices.size());
         for (Int32 idx : sp.indices) {
             if (idx < 0 || idx >= ptCount) continue;
-            Float px, py;
-            toPlane(collected.points[idx], px, py);
-            Int32 tx, ty;
-            toTempPixel(px, py, tx, ty);
-            corners.push_back({tx, ty});
+            Float px, py; toPlane(collected.points[idx], px, py);
+            corners.push_back({toTempX(px), toTempY(py)});
         }
         fillTempPoly(corners, r, g, b, alpha);
     }
 
-    // Render edges (boundary edges in silhouette mode, all in drawOutline mode)
-    // Build edge -> polygon count map
+    // Draw edges (boundary edges in silhouette mode)
     std::map<std::pair<Int32,Int32>, Int32> edgePolyCount;
     for (const auto& poly : collected.polygons) {
         Int32 n = (Int32)poly.indices.size();
         for (Int32 i = 0; i < n; i++) {
-            Int32 a = poly.indices[i];
-            Int32 b = poly.indices[(i + 1) % n];
+            Int32 a = poly.indices[i], b = poly.indices[(i+1)%n];
             auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
             edgePolyCount[key]++;
         }
@@ -635,43 +599,28 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
     for (const auto& line : collected.lines) {
         Int32 ia = line.v0, ib = line.v1;
         if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
-
-        bool drawThisLine = false;
-        if (line.isSpline) {
-            drawThisLine = true;
-        } else if (line.isPolygonEdge) {
+        bool drawIt = false;
+        if (line.isSpline) drawIt = true;
+        else if (line.isPolygonEdge) {
             auto key = (ia < ib) ? std::make_pair(ia, ib) : std::make_pair(ib, ia);
             Int32 cnt = edgePolyCount[key];
-            if (settings.drawOutline) drawThisLine = true;
-            else drawThisLine = (cnt <= 1);
-        } else {
-            drawThisLine = true;
-        }
-        if (!drawThisLine) continue;
+            drawIt = settings.drawOutline ? true : (cnt <= 1);
+        } else drawIt = true;
+        if (!drawIt) continue;
 
         Float px0, py0, px1, py1;
         toPlane(collected.points[ia], px0, py0);
         toPlane(collected.points[ib], px1, py1);
-        Int32 tx0, ty0, tx1, ty1;
-        toTempPixel(px0, py0, tx0, ty0);
-        toTempPixel(px1, py1, tx1, ty1);
-
-        auto to255 = [](const Vector& c) -> std::tuple<Int32,Int32,Int32> {
-            return std::make_tuple(ClampI((Int32)(c.x * 255.0), 0, 255),
-                                    ClampI((Int32)(c.y * 255.0), 0, 255),
-                                    ClampI((Int32)(c.z * 255.0), 0, 255));
-        };
-        auto [r, g, b] = to255(line.color);
+        Int32 tx0 = toTempX(px0), ty0 = toTempY(py0);
+        Int32 tx1 = toTempX(px1), ty1 = toTempY(py1);
+        auto [r, g, b] = to255v(line.color);
         Float thick = settings.ScaleLineWidth(line.thickness, m_width);
-        // Simple thick line on temp bitmap: draw Bresenham + dilate by thickness
-        // Bresenham line with thickness
-        Int32 dx = Abs(tx1 - tx0), dy = Abs(ty1 - ty0);
-        Int32 sx = (tx0 < tx1) ? 1 : -1;
-        Int32 sy = (ty0 < ty1) ? 1 : -1;
-        Int32 err = dx - dy;
-        Int32 cx = tx0, cy = ty0;
         Int32 half = (Int32)(thick * 0.5 + 0.5);
         if (half < 0) half = 0;
+        // Bresenham
+        Int32 dx = Abs(tx1 - tx0), dy = Abs(ty1 - ty0);
+        Int32 sx = (tx0 < tx1) ? 1 : -1, sy = (ty0 < ty1) ? 1 : -1;
+        Int32 err = dx - dy, cx = tx0, cy = ty0;
         while (true) {
             for (Int32 oy = -half; oy <= half; oy++)
                 for (Int32 ox = -half; ox <= half; ox++)
@@ -683,75 +632,44 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         }
     }
 
-    // ---- Stage 2: ray-cast each filled temp pixel to target, sample UV ----
-    InitBuffers(); // initializes m_rgb, m_alpha for the final bitmap
+    // ---- Stage 2: for each UV pixel, lookup 3D → project onto source plane → sample temp ----
+    // This is the fast path: NO ray-casting. Just a table lookup + dot products.
+    for (Int32 fy = 0; fy < m_height; fy++) {
+        for (Int32 fx = 0; fx < m_width; fx++) {
+            // Map final bitmap pixel to lookup pixel
+            Int32 lx = (Int32)((Float)fx / (Float)(m_width - 1) * (Float)(lookupResolution - 1) + 0.5);
+            Int32 ly = (Int32)((Float)fy / (float)(m_height - 1) * (float)(lookupResolution - 1) + 0.5);
+            if (lx < 0 || lx >= lookupResolution || ly < 0 || ly >= lookupResolution) continue;
 
-    // Z-buffer for final bitmap (closest ray hit wins)
-    std::vector<Float> zBuf((size_t)m_width * m_height, std::numeric_limits<Float>::max());
+            size_t lidx = (size_t)ly * lookupResolution + lx;
+            if (lidx >= uvFollowLookup.size()) continue;
 
-    Vector localTgt = targetInvMg * targetCenter;
-    auto to255 = [](const Vector& c) -> std::tuple<Int32,Int32,Int32> {
-        return std::make_tuple(ClampI((Int32)(c.x * 255.0), 0, 255),
-                                ClampI((Int32)(c.y * 255.0), 0, 255),
-                                ClampI((Int32)(c.z * 255.0), 0, 255));
-    };
+            Vector worldPos = uvFollowLookup[lidx];
+            // Project onto source plane
+            Vector d = worldPos - sourceCenter;
+            Float planeX = Dot(d, right);
+            Float planeY = Dot(d, up);
 
-    for (Int32 ty = 0; ty < m_height; ty++) {
-        for (Int32 tx = 0; tx < m_width; tx++) {
-            size_t idx = (size_t)ty * m_width + tx;
-            if (!tmp.filled[idx]) continue;
+            // Convert to temp bitmap pixel
+            Int32 tx = (Int32)((planeX - srcMinX) / rangeX * (tw - 1) + 0.5);
+            Int32 ty = (Int32)((planeY - srcMinY) / rangeY * (th - 1) + 0.5);
+            if (tx < 0 || tx >= tw || ty < 0 || ty >= th) continue;
 
-            Vector wp = tmp.worldPos[idx];
-            Vector localP = targetInvMg * wp;
-            Vector dir = localTgt - localP;
-            Float len = dir.GetLength();
-            if (len < 1e-7) continue;
-            dir = dir / len;
-            // Limit ray length to just past the target bounds for speed
-            Float rayLen = len + 100.0;
+            size_t tidx = (size_t)ty * tw + tx;
+            if (!tempFilled[tidx]) continue;
 
-            if (!rayCollider->Intersect(localP, dir, rayLen, false)) continue;
-            GeRayColResult res;
-            if (!rayCollider->GetNearestIntersection(&res)) continue;
-            if (res.face_id < 0) continue;
-
-            // Sample UV at hit
-            UVWStruct us = uvwTag->GetSlow(res.face_id);
-            Float u = res.barrycoords.x;
-            Float v = res.barrycoords.y;
-            Bool secondHalf = (res.tri_face_id < 0);
-            Vector uvw;
-            if (!secondHalf)
-                uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
-            else
-                uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
-
-            // Map UV to final bitmap pixel. V is flipped: UV v=0 is at the
-            // bottom, bitmap y=0 is at the top.
-            Int32 fx = (Int32)(uvw.x * (m_width  - 1) + 0.5);
-            Int32 fy = (Int32)((1.0 - uvw.y) * (m_height - 1) + 0.5);
-            if (fx < 0) fx = 0; else if (fx >= m_width)  fx = m_width  - 1;
-            if (fy < 0) fy = 0; else if (fy >= m_height) fy = m_height - 1;
-
-            // Z-test: closer hit wins
+            // Write to final bitmap
             size_t fidx = (size_t)fy * m_width + fx;
-            Float hitDist = res.distance;
-            if (hitDist < zBuf[fidx]) {
-                zBuf[fidx] = hitDist;
-                Int32 r = tmp.rgba[idx * 4 + 0];
-                Int32 g = tmp.rgba[idx * 4 + 1];
-                Int32 b = tmp.rgba[idx * 4 + 2];
-                Int32 a = tmp.rgba[idx * 4 + 3];
-                m_rgb[fidx * 3 + 0] = (uint8_t)r;
-                m_rgb[fidx * 3 + 1] = (uint8_t)g;
-                m_rgb[fidx * 3 + 2] = (uint8_t)b;
-                m_alpha[fidx] = (uint8_t)a;
-            }
+            m_rgb[fidx * 3 + 0] = tempRgba[tidx * 4 + 0];
+            m_rgb[fidx * 3 + 1] = tempRgba[tidx * 4 + 1];
+            m_rgb[fidx * 3 + 2] = tempRgba[tidx * 4 + 2];
+            m_alpha[fidx] = tempRgba[tidx * 4 + 3];
         }
     }
 
     return Flush();
 }
+
 
 
 // ==================== Buffers ====================

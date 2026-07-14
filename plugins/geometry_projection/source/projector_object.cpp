@@ -321,10 +321,50 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc, Hierar
 
     if (level >= CacheUpdateLevel::RASTER)
     {
-        // UV-follow now uses per-point projection (in Project()) + the normal
-        // rasterizer. No special-case bitmap generation needed.
-        Rasterizer rasterizer;
-        BaseBitmap* newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
+        BaseBitmap* newBitmap = nullptr;
+
+        if (settings.projMode == PROJ_MODE_UVFOLLOW)
+        {
+            // UV-follow Approach A: build/reuse UV→3D lookup, then render
+            // source orthographically and sample via lookup. Fast (no
+            // per-pixel ray-casting) and seamless.
+            BaseObject* tgtObj = static_cast<BaseObject*>(data->GetLink(TARGET_OBJECT, doc, Obase));
+            if (tgtObj)
+            {
+                // Check if target changed (dirty count) or resolution changed
+                BaseObject* surfObj = tgtObj;
+                if (!surfObj->IsInstanceOf(Opolygon))
+                {
+                    BaseObject* c = surfObj->GetCache();
+                    while (c && !c->IsInstanceOf(Opolygon)) c = c->GetCache();
+                    if (c) surfObj = c;
+                }
+                UInt32 tgtDirty = surfObj ? surfObj->GetDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE) : 0;
+                if (!cache->uvFollowLookupValid ||
+                    cache->uvFollowTargetDirty != tgtDirty ||
+                    cache->uvFollowResolution != previewRes)
+                {
+                    BuildUVFollowLookup(op, settings, cache);
+                }
+            }
+            if (cache->uvFollowLookupValid)
+            {
+                Rasterizer rasterizer;
+                newBitmap = rasterizer.RasterizeUVFollowApproachA(
+                    cache->geometry, settings,
+                    cache->uvFollowLookup, cache->uvFollowResolution);
+            }
+            else
+            {
+                Rasterizer rasterizer;
+                newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
+            }
+        }
+        else
+        {
+            Rasterizer rasterizer;
+            newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
+        }
 
         cache->SetBitmap(newBitmap);
         cache->rasterHash  = rasterHash;
@@ -371,7 +411,141 @@ Int32 GeometryProjectorObject::GetResolutionFromParam(Int32 paramValue)
     }
 }
 
-// ==================== UV Follow bitmap ====================
+// ==================== UV Follow Approach A ====================
+
+void GeometryProjectorObject::BuildUVFollowLookup(BaseObject* op,
+                                                     const ProjectionSettings& settings,
+                                                     ProjectionCache* cache)
+{
+    if (!settings.targetSurfaceObj) { cache->uvFollowLookupValid = false; return; }
+
+    // Find the polygon object (walk cache if target is a generator)
+    BaseObject* surfObj = settings.targetSurfaceObj;
+    if (!surfObj->IsInstanceOf(Opolygon))
+    {
+        BaseObject* c = surfObj->GetCache();
+        while (c && !c->IsInstanceOf(Opolygon)) c = c->GetCache();
+        if (!c) { c = surfObj->GetDown(); while (c && !c->IsInstanceOf(Opolygon)) c = c->GetNext(); }
+        if (c) surfObj = c; else { cache->uvFollowLookupValid = false; return; }
+    }
+    if (!surfObj->IsInstanceOf(Opolygon)) { cache->uvFollowLookupValid = false; return; }
+
+    BaseTag* tag = surfObj->GetTag(Tuvw);
+    if (!tag) { cache->uvFollowLookupValid = false; return; }
+    UVWTag* uvwTag = static_cast<UVWTag*>(tag);
+
+    PolygonObject* polyObj = static_cast<PolygonObject*>(surfObj);
+    Int32 polyCount = polyObj->GetPolygonCount();
+    Int32 pointCount = polyObj->GetPointCount();
+    if (polyCount <= 0 || pointCount <= 0) { cache->uvFollowLookupValid = false; return; }
+
+    const Vector*   pts  = polyObj->GetPointR();
+    const CPolygon* polys = polyObj->GetPolygonR();
+    if (!pts || !polys) { cache->uvFollowLookupValid = false; return; }
+
+    Matrix mg = surfObj->GetMg();
+
+    Int32 res = settings.previewResolution;
+    cache->uvFollowLookup.assign((size_t)res * res, Vector(0));
+    cache->uvFollowResolution = res;
+
+    // Build UV grid for spatial indexing: divide [0..1]² into 32×32 cells.
+    const Int32 GRID = 32;
+    std::vector<std::vector<Int32>> grid((size_t)GRID * GRID);
+
+    // For each polygon, compute UV bounding box and add to overlapping cells
+    for (Int32 pi = 0; pi < polyCount; pi++)
+    {
+        UVWStruct us = uvwTag->GetSlow(pi);
+        Float minU = std::min({us.a.x, us.b.x, us.c.x});
+        Float maxU = std::max({us.a.x, us.b.x, us.c.x});
+        Float minV = std::min({us.a.y, us.b.y, us.c.y});
+        Float maxV = std::max({us.a.y, us.b.y, us.c.y});
+        if (polys[pi].c != polys[pi].d)
+        {
+            minU = std::min(minU, us.d.x); maxU = std::max(maxU, us.d.x);
+            minV = std::min(minV, us.d.y); maxV = std::max(maxV, us.d.y);
+        }
+        Int32 x0 = (Int32)(minU * GRID); if (x0 < 0) x0 = 0; if (x0 >= GRID) x0 = GRID - 1;
+        Int32 x1 = (Int32)(maxU * GRID); if (x1 < 0) x1 = 0; if (x1 >= GRID) x1 = GRID - 1;
+        Int32 y0 = (Int32)(minV * GRID); if (y0 < 0) y0 = 0; if (y0 >= GRID) y0 = GRID - 1;
+        Int32 y1 = (Int32)(maxV * GRID); if (y1 < 0) y1 = 0; if (y1 >= GRID) y1 = GRID - 1;
+        for (Int32 gy = y0; gy <= y1; gy++)
+            for (Int32 gx = x0; gx <= x1; gx++)
+                grid[(size_t)gy * GRID + gx].push_back(pi);
+    }
+
+    // Point-in-triangle test with barycentric coordinates.
+    // Returns true if (u,v) is inside triangle (p0,p1,p2) in 2D.
+    // Outputs barycentric weights (w0, w1, w2).
+    auto pointInTri = [](Float u, Float v,
+                          Float p0u, Float p0v,
+                          Float p1u, Float p1v,
+                          Float p2u, Float p2v,
+                          Float& w0, Float& w1, Float& w2) -> bool {
+        Float v0u = p1u - p0u, v0v = p1v - p0v;
+        Float v1u = p2u - p0u, v1v = p2v - p0v;
+        Float v2u = u   - p0u, v2v = v   - p0v;
+        Float dot00 = v0u * v0u + v0v * v0v;
+        Float dot01 = v0u * v1u + v0v * v1v;
+        Float dot02 = v0u * v2u + v0v * v2v;
+        Float dot11 = v1u * v1u + v1v * v1v;
+        Float dot12 = v1u * v2u + v1v * v2v;
+        Float denom = dot00 * dot11 - dot01 * dot01;
+        if (std::abs(denom) < 1e-12) return false;
+        w1 = (dot11 * dot02 - dot01 * dot12) / denom;
+        w2 = (dot00 * dot12 - dot01 * dot02) / denom;
+        w0 = 1.0 - w1 - w2;
+        return (w1 >= -1e-6 && w2 >= -1e-6 && w0 >= -1e-6);
+    };
+
+    // For each UV pixel, find containing polygon and compute 3D position
+    for (Int32 py = 0; py < res; py++)
+    {
+        Float v = (Float)py / (Float)(res - 1);
+        Int32 gy = (Int32)(v * GRID); if (gy >= GRID) gy = GRID - 1;
+        for (Int32 px = 0; px < res; px++)
+        {
+            Float u = (Float)px / (Float)(res - 1);
+            Int32 gx = (Int32)(u * GRID); if (gx >= GRID) gx = GRID - 1;
+
+            const auto& cell = grid[(size_t)gy * GRID + gx];
+            bool found = false;
+            for (Int32 pi : cell)
+            {
+                if (found) break;
+                UVWStruct us = uvwTag->GetSlow(pi);
+                const CPolygon& poly = polys[pi];
+                Float w0, w1, w2;
+
+                // Triangle 1: a, b, c
+                if (pointInTri(u, v, us.a.x, us.a.y, us.b.x, us.b.y, us.c.x, us.c.y, w0, w1, w2))
+                {
+                    Vector localP = pts[poly.a] * w0 + pts[poly.b] * w1 + pts[poly.c] * w2;
+                    cache->uvFollowLookup[(size_t)py * res + px] = mg * localP;
+                    found = true;
+                    break;
+                }
+                // Triangle 2 (quad only): a, c, d
+                if (poly.c != poly.d)
+                {
+                    if (pointInTri(u, v, us.a.x, us.a.y, us.c.x, us.c.y, us.d.x, us.d.y, w0, w1, w2))
+                    {
+                        Vector localP = pts[poly.a] * w0 + pts[poly.c] * w1 + pts[poly.d] * w2;
+                        cache->uvFollowLookup[(size_t)py * res + px] = mg * localP;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            // If not found (UV gap), leave as (0,0,0) -- pixel won't be drawn
+        }
+    }
+
+    cache->uvFollowLookupValid = true;
+    cache->uvFollowTargetDirty = surfObj->GetDirty(DIRTYFLAGS::DATA | DIRTYFLAGS::CACHE);
+    cache->uvFollowResolution = res;
+}
 
 BaseBitmap* GeometryProjectorObject::RasterizeUVFollowBitmap(BaseObject* op,
                                                                 const ProjectionSettings& settings,
