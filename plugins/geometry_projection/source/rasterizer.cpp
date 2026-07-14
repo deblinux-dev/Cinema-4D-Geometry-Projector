@@ -1,6 +1,8 @@
 // Rasterizer implementation for Geometry Projector
 
 #include "rasterizer.h"
+#include "c4d_basetag.h"
+#include "c4d_libs/lib_collider.h"
 #include <algorithm>
 #include <map>
 #include <tuple>
