@@ -187,6 +187,29 @@ void GeometryCollector::CollectFromCache(BaseObject* cacheObj, const Matrix& wor
     {
         CollectSpline(static_cast<SplineObject*>(cacheObj), worldMg, splineSubdiv);
     }
+    else if (type == Oline)
+    {
+        // LineObject: parametric spline primitives (Circle, Rectangle, Arc)
+        // generate a LineObject in their cache with interpolated points.
+        // LineObject has points but no segments; treat it as a linear spline.
+        LineObject* lineObj = static_cast<LineObject*>(cacheObj);
+        Int32 ptCount = lineObj->GetPointCount();
+        if (ptCount >= 2)
+        {
+            const Vector* pts = lineObj->GetPointR();
+            if (pts)
+            {
+                Int32 baseIdx = (Int32)m_geometry.points.size();
+                for (Int32 i = 0; i < ptCount; i++)
+                    m_geometry.points.push_back(worldMg * pts[i]);
+
+                for (Int32 i = 0; i < ptCount - 1; i++)
+                    m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
+                                                 m_currentColor, m_currentThickness,
+                                                 true, false, m_currentOwner });
+            }
+        }
+    }
 
     // Recurse into generator cache children
     BaseObject* childCache = cacheObj->GetCache();

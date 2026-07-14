@@ -388,6 +388,34 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
             Float v1 = projected.points2d[ib].second;
             if (!CS_ClipLine(u0, v0, u1, v1)) continue;
 
+            // Clip mask: if the line's owner has a clip mask, check if the
+            // line's midpoint is inside the mask. If not, skip the whole line.
+            // (Per-pixel clipping of thick lines is complex; midpoint test is
+            // a reasonable approximation for typical use cases.)
+            auto maskIt = projected.clipMasks.find(line.ownerObj);
+            if (maskIt != projected.clipMasks.end())
+            {
+                Float midU = (u0 + u1) * 0.5;
+                Float midV = (v0 + v1) * 0.5;
+                bool inside = false;
+                for (const auto& poly : maskIt->second)
+                {
+                    Int32 pn = (Int32)poly.size();
+                    if (pn < 3) continue;
+                    bool in = false;
+                    for (Int32 i = 0, j = pn - 1; i < pn; j = i++)
+                    {
+                        Float xi = poly[i].first,  yi = poly[i].second;
+                        Float xj = poly[j].first,  yj = poly[j].second;
+                        if (((yi > midV) != (yj > midV)) &&
+                            (midU < (xj - xi) * (midV - yi) / ((yj - yi) != 0.0 ? (yj - yi) : 1e-10) + xi))
+                            in = !in;
+                    }
+                    if (in) { inside = true; break; }
+                }
+                if (!inside) continue;
+            }
+
             auto [r, g, b] = to255(line.color);
             Float thick = settings.ScaleLineWidth(line.thickness, m_width);
 
@@ -499,22 +527,30 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         tx = (Int32)((px - srcMinX) / rangeX * (m_width  - 1) + 0.5);
         ty = (Int32)((py - srcMinY) / rangeY * (m_height - 1) + 0.5);
     };
-    // Helper: write a pixel to temp (with depth via painter's algorithm: later wins)
-    auto setTempPixel = [&](Int32 tx, Int32 ty, Int32 r, Int32 g, Int32 b, Int32 a,
-                             const Vector& wp) {
+    // Helper: temp bitmap pixel -> world position (inverse of toPlane+toTempPixel)
+    // This is the KEY fix: instead of interpolating worldPos from polygon edges
+    // (which was broken), we compute it directly from the pixel coordinates.
+    // Each pixel (tx,ty) maps to a specific point on the projection plane,
+    // whose world position is sourceCenter + right*planeX + up*planeY.
+    auto tempPixelToWorld = [&](Int32 tx, Int32 ty) -> Vector {
+        Float px = srcMinX + (Float)tx / (Float)(m_width  - 1) * rangeX;
+        Float py = srcMinY + (Float)ty / (Float)(m_height - 1) * rangeY;
+        return sourceCenter + right * px + up * py;
+    };
+    // Helper: write a pixel to temp
+    auto setTempPixel = [&](Int32 tx, Int32 ty, Int32 r, Int32 g, Int32 b, Int32 a) {
         if (tx < 0 || tx >= m_width || ty < 0 || ty >= m_height) return;
         size_t idx = (size_t)ty * m_width + tx;
         tmp.rgba[idx * 4 + 0] = (uint8_t)r;
         tmp.rgba[idx * 4 + 1] = (uint8_t)g;
         tmp.rgba[idx * 4 + 2] = (uint8_t)b;
         tmp.rgba[idx * 4 + 3] = (uint8_t)a;
-        tmp.worldPos[idx] = wp;
+        tmp.worldPos[idx] = tempPixelToWorld(tx, ty);
         tmp.filled[idx] = 1;
     };
     // Helper: temp bitmap scanline fill for a polygon
     auto fillTempPoly = [&](const std::vector<std::pair<Int32,Int32>>& corners,
-                             Int32 r, Int32 g, Int32 b, Int32 a,
-                             const std::vector<Vector>& worldPts) {
+                             Int32 r, Int32 g, Int32 b, Int32 a) {
         if (corners.size() < 3) return;
         Int32 minY = corners[0].second, maxY = corners[0].second;
         for (size_t i = 1; i < corners.size(); i++) {
@@ -538,21 +574,7 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
             std::sort(xs.begin(), xs.end());
             for (size_t k = 0; k + 1 < xs.size(); k += 2) {
                 for (Int32 x = xs[k]; x <= xs[k + 1]; x++) {
-                    // Interpolate world position across the scanline
-                    Float t = (xs[k + 1] != xs[k]) ? (Float)(x - xs[k]) / (Float)(xs[k + 1] - xs[k]) : 0.0;
-                    Vector wp(0);
-                    // Find the two edge points at this y for interpolation
-                    // (simple: use the first edge pair found)
-                    for (Int32 i = 0; i < n; i++) {
-                        Int32 j = (i + 1) % n;
-                        Int32 ay = corners[i].second, by = corners[j].second;
-                        if ((ay <= y && by > y) || (by <= y && ay > y)) {
-                            Float tt = (Float)(y - ay) / (Float)(by - ay);
-                            wp = worldPts[i] * (1.0 - tt) + worldPts[j] * tt;
-                            break;
-                        }
-                    }
-                    setTempPixel(x, y, r, g, b, a, wp);
+                    setTempPixel(x, y, r, g, b, a);
                 }
             }
         }
@@ -569,9 +591,7 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         auto to255 = [](Float c) -> Int32 { return ClampI((Int32)(c * 255.0), 0, 255); };
         Int32 r = to255(poly.color.x), g = to255(poly.color.y), b = to255(poly.color.z);
         std::vector<std::pair<Int32,Int32>> corners;
-        std::vector<Vector> worldPts;
         corners.reserve(poly.indices.size());
-        worldPts.reserve(poly.indices.size());
         for (Int32 idx : poly.indices) {
             if (idx < 0 || idx >= ptCount) continue;
             Float px, py;
@@ -579,9 +599,8 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
             Int32 tx, ty;
             toTempPixel(px, py, tx, ty);
             corners.push_back({tx, ty});
-            worldPts.push_back(collected.points[idx]);
         }
-        fillTempPoly(corners, r, g, b, alpha, worldPts);
+        fillTempPoly(corners, r, g, b, alpha);
     }
     for (const auto& sp : collected.closed_splines) {
         if ((Int32)sp.indices.size() < 3) continue;
@@ -589,9 +608,7 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         auto to255 = [](Float c) -> Int32 { return ClampI((Int32)(c * 255.0), 0, 255); };
         Int32 r = to255(sp.color.x), g = to255(sp.color.y), b = to255(sp.color.z);
         std::vector<std::pair<Int32,Int32>> corners;
-        std::vector<Vector> worldPts;
         corners.reserve(sp.indices.size());
-        worldPts.reserve(sp.indices.size());
         for (Int32 idx : sp.indices) {
             if (idx < 0 || idx >= ptCount) continue;
             Float px, py;
@@ -599,9 +616,8 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
             Int32 tx, ty;
             toTempPixel(px, py, tx, ty);
             corners.push_back({tx, ty});
-            worldPts.push_back(collected.points[idx]);
         }
-        fillTempPoly(corners, r, g, b, alpha, worldPts);
+        fillTempPoly(corners, r, g, b, alpha);
     }
 
     // Render edges (boundary edges in silhouette mode, all in drawOutline mode)
@@ -648,11 +664,7 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         auto [r, g, b] = to255(line.color);
         Float thick = settings.ScaleLineWidth(line.thickness, m_width);
         // Simple thick line on temp bitmap: draw Bresenham + dilate by thickness
-        // For simplicity, use a basic line with round caps.
-        // Draw line and mark worldPos at midpoint.
-        Vector midWp = (collected.points[ia] + collected.points[ib]) * 0.5;
-
-        // Bresenham
+        // Bresenham line with thickness
         Int32 dx = Abs(tx1 - tx0), dy = Abs(ty1 - ty0);
         Int32 sx = (tx0 < tx1) ? 1 : -1;
         Int32 sy = (ty0 < ty1) ? 1 : -1;
@@ -661,10 +673,9 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
         Int32 half = (Int32)(thick * 0.5 + 0.5);
         if (half < 0) half = 0;
         while (true) {
-            // Draw a small filled square/circle at this point
             for (Int32 oy = -half; oy <= half; oy++)
                 for (Int32 ox = -half; ox <= half; ox++)
-                    setTempPixel(cx + ox, cy + oy, r, g, b, alpha, midWp);
+                    setTempPixel(cx + ox, cy + oy, r, g, b, alpha);
             if (cx == tx1 && cy == ty1) break;
             Int32 e2 = 2 * err;
             if (e2 > -dy) { err -= dy; cx += sx; }
