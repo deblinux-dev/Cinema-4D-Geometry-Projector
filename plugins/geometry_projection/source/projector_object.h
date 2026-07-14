@@ -53,11 +53,6 @@ private:
     void CreateShader(BaseObject* op, BaseDocument* doc);
     void BakeToFile(BaseObject* op, BaseDocument* doc);
 
-    // UV-follow helper: sets up GeRayCollider + UVWTag from the target object,
-    // then calls Rasterizer::RasterizeUVFollow. Returns nullptr on failure.
-    BaseBitmap* RasterizeUVFollowBitmap(BaseObject* op, const ProjectionSettings& settings,
-                                         const CollectedGeometry& geometry);
-
     // UV-follow Approach A: build a UV→3D lookup table for the target surface.
     // For each UV pixel, finds the containing polygon and computes the 3D
     // world position via barycentric interpolation. Uses a UV grid for fast

@@ -547,55 +547,6 @@ void GeometryProjectorObject::BuildUVFollowLookup(BaseObject* op,
     cache->uvFollowResolution = res;
 }
 
-BaseBitmap* GeometryProjectorObject::RasterizeUVFollowBitmap(BaseObject* op,
-                                                                const ProjectionSettings& settings,
-                                                                const CollectedGeometry& geometry)
-{
-    if (!settings.targetSurfaceObj) return nullptr;
-
-    // Find the polygon object (walk cache if target is a generator)
-    BaseObject* surfObj = settings.targetSurfaceObj;
-    if (!surfObj->IsInstanceOf(Opolygon))
-    {
-        BaseObject* cache = surfObj->GetCache();
-        while (cache && !cache->IsInstanceOf(Opolygon))
-            cache = cache->GetCache();
-        if (!cache)
-        {
-            cache = surfObj->GetDown();
-            while (cache && !cache->IsInstanceOf(Opolygon))
-                cache = cache->GetNext();
-        }
-        if (cache) surfObj = cache;
-        else return nullptr;
-    }
-    if (!surfObj->IsInstanceOf(Opolygon)) return nullptr;
-
-    // Find UVW tag
-    BaseTag* tag = surfObj->GetTag(Tuvw);
-    if (!tag) return nullptr;
-    UVWTag* uvwTag = static_cast<UVWTag*>(tag);
-
-    // Build ray collider
-    GeRayCollider* rc = GeRayCollider::Alloc();
-    if (!rc) return nullptr;
-    if (!rc->Init(surfObj, true))
-    {
-        GeRayCollider::Free(rc);
-        return nullptr;
-    }
-
-    Matrix mg = surfObj->GetMg();
-    Matrix invMg = ~mg;
-    Vector targetCenter = mg * surfObj->GetMp();
-
-    Rasterizer rasterizer;
-    BaseBitmap* bm = rasterizer.RasterizeUVFollow(geometry, settings, rc, uvwTag,
-                                                    invMg, targetCenter);
-    GeRayCollider::Free(rc);
-    return bm;
-}
-
 ProjectionCache* GeometryProjectorObject::GetCache(BaseObject* op)
 {
     if (m_cacheId == 0)
