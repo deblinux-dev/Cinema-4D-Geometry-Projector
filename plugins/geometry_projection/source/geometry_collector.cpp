@@ -112,10 +112,14 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
         BaseObject* child = obj->GetDown();
         while (child)
         {
-            if (child->IsInstanceOf(Ospline) && child->GetPointCount() >= 2)
+            if (child->IsInstanceOf(Ospline))
             {
-                CollectSpline(static_cast<SplineObject*>(child), obj->GetMg(), splineSubdiv);
-                return;
+                SplineObject* childSpline = static_cast<SplineObject*>(child);
+                if (childSpline->GetPointCount() >= 2)
+                {
+                    CollectSpline(childSpline, obj->GetMg(), splineSubdiv);
+                    return;
+                }
             }
             child = child->GetNext();
         }
