@@ -189,6 +189,74 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         return settings.drawFill;
     };
 
+    // Clip mask check: returns true if (u,v) is inside the owner's clip mask
+    // (or if the owner has no clip mask).
+    auto pointInMask = [&](BaseObject* owner, Float u, Float v) -> bool {
+        auto it = projected.clipMasks.find(owner);
+        if (it == projected.clipMasks.end()) return true; // no mask = visible
+        const auto& mask = it->second;
+        for (const auto& poly : mask)
+        {
+            Int32 n = (Int32)poly.size();
+            if (n < 3) continue;
+            bool inside = false;
+            for (Int32 i = 0, j = n - 1; i < n; j = i++)
+            {
+                Float xi = poly[i].first,  yi = poly[i].second;
+                Float xj = poly[j].first,  yj = poly[j].second;
+                if (((yi > v) != (yj > v)) &&
+                    (u < (xj - xi) * (v - yi) / ((yj - yi) != 0.0 ? (yj - yi) : 1e-10) + xi))
+                    inside = !inside;
+            }
+            if (inside) return true;
+        }
+        return false;
+    };
+
+    // Masked scanline fill: only fill pixels inside the owner's clip mask
+    auto maskedScanlineFill = [&](const std::vector<std::pair<Int32,Int32>>& corners,
+                                   Int32 r, Int32 g, Int32 b, Int32 a,
+                                   BaseObject* owner) {
+        if (corners.size() < 3) return;
+        Int32 n = (Int32)corners.size();
+        Int32 minY = corners[0].second, maxY = corners[0].second;
+        for (Int32 i = 1; i < n; i++) {
+            if (corners[i].second < minY) minY = corners[i].second;
+            if (corners[i].second > maxY) maxY = corners[i].second;
+        }
+        minY = ClampI(minY, 0, m_height - 1);
+        maxY = ClampI(maxY, 0, m_height - 1);
+        for (Int32 y = minY; y <= maxY; y++) {
+            std::vector<Int32> xs;
+            for (Int32 i = 0; i < n; i++) {
+                Int32 j = (i + 1) % n;
+                Int32 ay = corners[i].second, by = corners[j].second;
+                Int32 ax = corners[i].first,  bx = corners[j].first;
+                if ((ay <= y && by > y) || (by <= y && ay > y)) {
+                    Int32 x = ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay));
+                    xs.push_back(x);
+                }
+            }
+            std::sort(xs.begin(), xs.end());
+            for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                Int32 x0 = ClampI(xs[k], 0, m_width - 1);
+                Int32 x1 = ClampI(xs[k + 1], 0, m_width - 1);
+                for (Int32 x = x0; x <= x1; x++) {
+                    // Convert pixel (x,y) back to UV and check mask
+                    Float u = (Float)x / (Float)(m_width - 1);
+                    Float v = 1.0 - (Float)y / (Float)(m_height - 1);
+                    if (pointInMask(owner, u, v)) {
+                        Int32 idx = y * m_width + x;
+                        m_rgb[idx * 3 + 0] = (uint8_t)r;
+                        m_rgb[idx * 3 + 1] = (uint8_t)g;
+                        m_rgb[idx * 3 + 2] = (uint8_t)b;
+                        m_alpha[idx] = (uint8_t)a;
+                    }
+                }
+            }
+        }
+    };
+
     for (const auto& poly : projected.polygons)
     {
         if ((Int32)poly.indices.size() < 3) continue;
@@ -211,7 +279,11 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         corners.reserve(uvPoly.size());
         for (const auto& uv : uvPoly)
             corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
-        ScanlineFill(corners, r, g, b, alpha);
+        // Use masked fill if the owner has a clip mask, plain fill otherwise
+        if (projected.clipMasks.find(poly.ownerObj) != projected.clipMasks.end())
+            maskedScanlineFill(corners, r, g, b, alpha, poly.ownerObj);
+        else
+            ScanlineFill(corners, r, g, b, alpha);
     }
 
     // Fill closed splines (per-object override applies too)
@@ -235,7 +307,10 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
         corners.reserve(uvPoly.size());
         for (const auto& uv : uvPoly)
             corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
-        ScanlineFill(corners, r, g, b, alpha);
+        if (projected.clipMasks.find(sp.ownerObj) != projected.clipMasks.end())
+            maskedScanlineFill(corners, r, g, b, alpha, sp.ownerObj);
+        else
+            ScanlineFill(corners, r, g, b, alpha);
     }
 
     // 2. Draw edges. Two modes:
@@ -621,7 +696,8 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
             Float len = dir.GetLength();
             if (len < 1e-7) continue;
             dir = dir / len;
-            Float rayLen = len * 2.0 + 1000.0;
+            // Limit ray length to just past the target bounds for speed
+            Float rayLen = len + 100.0;
 
             if (!rayCollider->Intersect(localP, dir, rayLen, false)) continue;
             GeRayColResult res;
@@ -639,9 +715,10 @@ BaseBitmap* Rasterizer::RasterizeUVFollow(const CollectedGeometry& collected,
             else
                 uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
 
-            // Map UV to final bitmap pixel
+            // Map UV to final bitmap pixel. V is flipped: UV v=0 is at the
+            // bottom, bitmap y=0 is at the top.
             Int32 fx = (Int32)(uvw.x * (m_width  - 1) + 0.5);
-            Int32 fy = (Int32)(uvw.y * (m_height - 1) + 0.5);
+            Int32 fy = (Int32)((1.0 - uvw.y) * (m_height - 1) + 0.5);
             if (fx < 0) fx = 0; else if (fx >= m_width)  fx = m_width  - 1;
             if (fy < 0) fy = 0; else if (fy >= m_height) fy = m_height - 1;
 

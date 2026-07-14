@@ -469,161 +469,21 @@ void GeometryProjector::ApplyClipping(ProjectedGeometry& proj)
     // Nothing to do if no clip sources were recorded.
     if (!m_geometry) return;
     if (m_geometry->clipSources.empty()) return;
-    if (proj.polygons.empty() && proj.lines.empty() && proj.closedSplines.empty()) return;
 
-    // Process owners in dependency order: an owner whose clip sources include
-    // another owner that ALSO has clip sources must be processed after that
-    // other owner's silhouette is finalized. We do a simple iterative
-    // topological resolution: repeat until no changes.
-    std::vector<BaseObject*> ownersWithClips;
+    // For each owner with clip sources, build a clip mask (list of 2D UV
+    // polygons from the clip sources' projected outlines). The rasterizer
+    // will use this mask to discard fill pixels outside the clip region.
+    // This replaces the previous Sutherland-Hodgman polygon clipping which
+    // only worked for convex clip polygons and was destroying fills.
     for (const auto& kv : m_geometry->clipSources)
-        ownersWithClips.push_back(kv.first);
-
-    // For each owner, build its clip silhouette and clip its own geometry.
-    // Because silhouettes are read from proj.polygons/closedSplines (which we
-    // mutate in place), processing order matters. We iterate owners and for
-    // each, only clip once its clip sources have no pending clips themselves
-    // (or have already been processed). A few passes suffice for typical depth.
-    std::set<BaseObject*> done;
-    for (Int32 pass = 0; pass < 16 && (Int32)done.size() < (Int32)ownersWithClips.size(); pass++)
     {
-        for (BaseObject* owner : ownersWithClips)
-        {
-            if (done.count(owner)) continue;
-            auto it = m_geometry->clipSources.find(owner);
-            if (it == m_geometry->clipSources.end()) { done.insert(owner); continue; }
-            const std::vector<BaseObject*>& clips = it->second;
-            // Check all clip sources are either clip-free or already done.
-            bool ready = true;
-            for (BaseObject* c : clips)
-                if (m_geometry->clipSources.count(c) && !done.count(c)) { ready = false; break; }
-            if (!ready) continue;
+        BaseObject* owner = kv.first;
+        const std::vector<BaseObject*>& clips = kv.second;
 
-            // Build combined silhouette of clip sources (from current proj state,
-            // which may already be clipped for nested sources).
-            std::vector<std::vector<std::pair<Float,Float>>> sil;
-            BuildOwnerSilhouette(proj, clips, sil);
-            if (sil.empty()) { done.insert(owner); continue; }
-
-            // 1. Clip this owner's polygons (fill) against the silhouette.
-            std::vector<CollectedPolygon> newPolys;
-            for (auto& poly : proj.polygons)
-            {
-                if (poly.ownerObj != owner) { newPolys.push_back(poly); continue; }
-                std::vector<std::pair<Float,Float>> uv;
-                uv.reserve(poly.indices.size());
-                for (Int32 idx : poly.indices)
-                    if (idx >= 0 && idx < (Int32)proj.points2d.size())
-                        uv.push_back(proj.points2d[idx]);
-                // Intersect with union of silhouette polys (for convex polys,
-                // intersecting each keeps the intersection; for a union we'd
-                // need to collect all results. Here we clip against each poly
-                // and keep the result of the first that yields a non-empty
-                // polygon, which is a reasonable approximation for typical
-                // single-boundary use cases like eye/mouth clipping.)
-                std::vector<std::pair<Float,Float>> best = uv;
-                bool kept = false;
-                for (const auto& cp : sil)
-                {
-                    auto clipped = SH_ClipPolyVsPoly(uv, cp);
-                    if (clipped.size() >= 3)
-                    {
-                        // Add as a NEW polygon (split) so multi-region coverage works.
-                        CollectedPolygon np = poly;
-                        // Need new point indices. We append the clipped UV as
-                        // new points and reference them.
-                        Int32 base = (Int32)proj.points2d.size();
-                        np.indices.clear();
-                        for (const auto& p : clipped)
-                        {
-                            proj.points2d.push_back(p);
-                            np.indices.push_back(base++);
-                        }
-                        newPolys.push_back(np);
-                        kept = true;
-                    }
-                }
-                if (!kept)
-                {
-                    // Fully outside all clip polys -> discard (don't push).
-                }
-            }
-            proj.polygons = std::move(newPolys);
-
-            // 2. Clip closed splines the same way (treat as fill polygons).
-            std::vector<CollectedPolygon> newSp;
-            for (auto& sp : proj.closedSplines)
-            {
-                if (sp.ownerObj != owner) { newSp.push_back(sp); continue; }
-                std::vector<std::pair<Float,Float>> uv;
-                uv.reserve(sp.indices.size());
-                for (Int32 idx : sp.indices)
-                    if (idx >= 0 && idx < (Int32)proj.points2d.size())
-                        uv.push_back(proj.points2d[idx]);
-                bool kept = false;
-                for (const auto& cp : sil)
-                {
-                    auto clipped = SH_ClipPolyVsPoly(uv, cp);
-                    if (clipped.size() >= 3)
-                    {
-                        CollectedPolygon np = sp;
-                        Int32 base = (Int32)proj.points2d.size();
-                        np.indices.clear();
-                        for (const auto& p : clipped)
-                        {
-                            proj.points2d.push_back(p);
-                            np.indices.push_back(base++);
-                        }
-                        newSp.push_back(np);
-                        kept = true;
-                    }
-                }
-            }
-            proj.closedSplines = std::move(newSp);
-
-            // 3. Clip lines: clip each segment AGAINST the silhouette polygon
-            // (not just test endpoints). A segment from inside to outside is
-            // clipped at the boundary so nothing draws beyond it. This prevents
-            // the chaotic cross-lines that appeared when moving clipped objects.
-            std::vector<CollectedLine> newLines;
-            newLines.reserve(proj.lines.size());
-            for (const auto& line : proj.lines)
-            {
-                if (line.ownerObj != owner) { newLines.push_back(line); continue; }
-                if (line.v0 < 0 || line.v0 >= (Int32)proj.points2d.size() ||
-                    line.v1 < 0 || line.v1 >= (Int32)proj.points2d.size())
-                    continue;
-                const auto& p0 = proj.points2d[line.v0];
-                const auto& p1 = proj.points2d[line.v1];
-
-                // Clip the segment against each silhouette polygon. Keep the
-                // first non-empty result (typical single-boundary case).
-                bool clipped = false;
-                for (const auto& cp : sil)
-                {
-                    Float u0 = p0.first, v0 = p0.second;
-                    Float u1 = p1.first, v1 = p1.second;
-                    if (ClipLineVsPoly(u0, v0, u1, v1, cp))
-                    {
-                        // The segment (or part of it) is inside this clip poly.
-                        // Create a new line with the clipped endpoints.
-                        CollectedLine nl = line;
-                        Int32 base = (Int32)proj.points2d.size();
-                        proj.points2d.push_back({u0, v0});
-                        proj.points2d.push_back({u1, v1});
-                        nl.v0 = base;
-                        nl.v1 = base + 1;
-                        newLines.push_back(nl);
-                        clipped = true;
-                        break; // first non-empty result is enough
-                    }
-                }
-                // If no clip poly intersected, the segment is fully outside -> discard.
-            }
-            proj.lines = std::move(newLines);
-
-            done.insert(owner);
-        }
+        std::vector<std::vector<std::pair<Float,Float>>> mask;
+        BuildOwnerSilhouette(proj, clips, mask);
+        if (!mask.empty())
+            proj.clipMasks[owner] = std::move(mask);
     }
 }
 

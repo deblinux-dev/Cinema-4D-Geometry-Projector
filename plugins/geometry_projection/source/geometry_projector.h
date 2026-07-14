@@ -5,6 +5,7 @@
 #include "geometry_collector.h"
 #include <vector>
 #include <utility>
+#include <map>
 
 // All projection and drawing settings, populated from the object's BaseContainer
 struct ProjectionSettings
@@ -105,6 +106,14 @@ struct ProjectedGeometry
 
     // Closed splines with per-object color (copied from CollectedGeometry)
     std::vector<CollectedPolygon> closedSplines;
+
+    // Clip masks: for each owner object that has clip sources, a list of
+    // 2D polygons (in UV space) whose union defines the visible region.
+    // The rasterizer checks each fill pixel against the owner's mask: if the
+    // pixel is outside all mask polygons, it's discarded. This replaces the
+    // fragile Sutherland-Hodgman polygon clipping (which only works for
+    // convex clip polygons and was destroying fills).
+    std::map<BaseObject*, std::vector<std::vector<std::pair<Float,Float>>>> clipMasks;
 
     // Raw 2D bounds before normalization
     Float boundsMinX, boundsMinY;

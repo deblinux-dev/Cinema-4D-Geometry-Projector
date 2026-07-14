@@ -81,10 +81,8 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
 
     // For spline objects (editable OR parametric like Circle/Rectangle/Arc):
     // Use GetVirtualLineObject which is the official API for getting a
-    // LineObject (interpolated points) from ANY spline -- editable or
-    // parametric primitive. It requires HierarchyHelp from GetVirtualObjects.
-    // This is the ONLY reliable way to get points from parametric spline
-    // primitives during generator evaluation.
+    // LineObject/SplineObject from ANY spline -- editable or parametric
+    // primitive. It requires HierarchyHelp from GetVirtualObjects.
     if (obj->IsInstanceOf(Ospline))
     {
         SplineObject* splineObj = static_cast<SplineObject*>(obj);
@@ -97,13 +95,14 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
         }
 
         // Parametric spline: use GetVirtualLineObject to force interpolation.
-        // keep_spline=false returns a LineObject with dense interpolated points.
+        // keep_spline=true returns a SplineObject (not LineObject), so
+        // IsInstanceOf(Ospline) succeeds and we can use CollectSpline.
         // recurse=true searches children/caches if the object itself has no line.
         if (m_hh)
         {
             Matrix mres;
             Bool dirty = false;
-            BaseObject* lineObj = GetVirtualLineObject(obj, m_hh, obj->GetMl(), false, true, &mres, &dirty);
+            BaseObject* lineObj = GetVirtualLineObject(obj, m_hh, obj->GetMl(), true, true, &mres, &dirty);
             if (lineObj && lineObj->IsInstanceOf(Ospline))
             {
                 SplineObject* realSpline = static_cast<SplineObject*>(lineObj);
