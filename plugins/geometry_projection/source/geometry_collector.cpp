@@ -203,10 +203,26 @@ void GeometryCollector::CollectFromCache(BaseObject* cacheObj, const Matrix& wor
                 for (Int32 i = 0; i < ptCount; i++)
                     m_geometry.points.push_back(worldMg * pts[i]);
 
+                // Line segments (for outline rendering)
                 for (Int32 i = 0; i < ptCount - 1; i++)
                     m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
                                                  m_currentColor, m_currentThickness,
                                                  true, false, m_currentOwner });
+                // Close the loop (parametric splines like Circle are closed)
+                m_geometry.lines.push_back({ baseIdx + ptCount - 1, baseIdx,
+                                             m_currentColor, m_currentThickness,
+                                             true, false, m_currentOwner });
+
+                // Add as closed spline for fill rendering
+                std::vector<Int32> splinePoly;
+                splinePoly.reserve(ptCount);
+                for (Int32 i = 0; i < ptCount; i++)
+                    splinePoly.push_back(baseIdx + i);
+                m_geometry.closed_splines.push_back({ std::move(splinePoly),
+                                                      m_currentColor,
+                                                      m_currentFillOverride,
+                                                      m_currentFill,
+                                                      m_currentOwner });
             }
         }
     }

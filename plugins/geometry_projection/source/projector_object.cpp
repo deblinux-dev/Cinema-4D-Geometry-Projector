@@ -215,6 +215,13 @@ BaseObject* GeometryProjectorObject::GetVirtualObjects(BaseObject* op, Hierarchy
     // CompareDependenceList returns true if NOTHING changed since last eval.
     Bool dirty = !op->CompareDependenceList();
 
+    // Check if the projector object's own parameters changed (line width,
+    // fill, outline, colors, projection mode, etc.). CompareDependenceList
+    // only tracks external object dependencies, not the object's own data.
+    // op->IsDirty(DATA) catches parameter edits.
+    if (!dirty && op->IsDirty(DIRTYFLAGS::DATA))
+        dirty = true;
+
     // Supplementary check: if the dependence list says "no change" but a
     // source object IsDirty (e.g. it was moved but C4D's dependence tracking
     // hasn't registered it yet -- which can happen when no target object is
@@ -314,20 +321,10 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc, Hierar
 
     if (level >= CacheUpdateLevel::RASTER)
     {
-        BaseBitmap* newBitmap = nullptr;
-
-        if (settings.projMode == PROJ_MODE_UVFOLLOW)
-        {
-            // UV-follow: two-stage pixel projection (orthographic render +
-            // per-pixel ray-cast to target UV). This bypasses the normal
-            // Project + Rasterize pipeline entirely.
-            newBitmap = RasterizeUVFollowBitmap(op, settings, cache->geometry);
-        }
-        else
-        {
-            Rasterizer rasterizer;
-            newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
-        }
+        // UV-follow now uses per-point projection (in Project()) + the normal
+        // rasterizer. No special-case bitmap generation needed.
+        Rasterizer rasterizer;
+        BaseBitmap* newBitmap = rasterizer.Rasterize(cache->projected, cache->geometry, settings);
 
         cache->SetBitmap(newBitmap);
         cache->rasterHash  = rasterHash;
@@ -559,16 +556,8 @@ void GeometryProjectorObject::BakeToFile(BaseObject* op, BaseDocument* doc)
     ProjectedGeometry projected;
     projector.Project(collector.GetGeometry(), settings, projected);
 
-    BaseBitmap* bitmap = nullptr;
-    if (settings.projMode == PROJ_MODE_UVFOLLOW)
-    {
-        bitmap = RasterizeUVFollowBitmap(op, settings, collector.GetGeometry());
-    }
-    else
-    {
-        Rasterizer rasterizer;
-        bitmap = rasterizer.Rasterize(projected, collector.GetGeometry(), settings);
-    }
+    Rasterizer rasterizer;
+    BaseBitmap* bitmap = rasterizer.Rasterize(projected, collector.GetGeometry(), settings);
     if (!bitmap)
     {
         MessageDialog("Rasterization failed."_s);

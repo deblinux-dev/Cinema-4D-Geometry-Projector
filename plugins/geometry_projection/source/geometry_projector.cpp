@@ -163,14 +163,14 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
     std::vector<std::pair<Float,Float>> pts2d;
     pts2d.reserve(ptCount);
 
-    // UV-follow mode: ray-cast the SOURCE CENTER to the target to find the
-    // anchor UV, then flat-project all points (preserving the source's shape)
-    // and place them at the anchor UV. This produces a clean, undistorted
-    // silhouette on the target surface -- a square stays a square, a circle
-    // stays a circle -- just positioned at the right UV spot.
+    // UV-follow mode: per-point projection. Each source point is ray-cast to
+    // the target surface, and the hit UV is used directly. This is fast
+    // (~100-1000 ray-casts for typical source) and uses the existing
+    // high-quality rasterizer. Seam handling: after all points are projected,
+    // correct UV jumps > 0.5 (which indicate seam crossings) by offsetting
+    // subsequent points by ±1.0 so the silhouette stays continuous.
     if (settings.projMode == PROJ_MODE_UVFOLLOW)
     {
-        // Compute source center (centroid of all source points).
         Vector sourceCenter(0);
         for (Int32 i = 0; i < ptCount; i++)
             sourceCenter += geometry.points[i];
@@ -186,6 +186,69 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
         for (Int32 i = 0; i < ptCount; i++)
             pts2d.push_back(ProjectUVFollow(geometry.points[i], settings));
 
+        // ---- Seam correction ----
+        // When neighboring points cross a UV seam, their UV values jump by
+        // ~1.0. Detect this by comparing each point's UV to the previous
+        // point's UV: if the delta > 0.5, offset by ±1.0 to keep the
+        // silhouette continuous. This makes the decal seamless across seams.
+        if (pts2d.size() >= 2)
+        {
+            // Build a graph of connected points (from lines) to propagate
+            // seam corrections along connected paths.
+            std::map<Int32, std::vector<Int32>> adj;
+            for (const auto& line : geometry.lines)
+            {
+                adj[line.v0].push_back(line.v1);
+                adj[line.v1].push_back(line.v0);
+            }
+            for (const auto& poly : geometry.polygons)
+            {
+                Int32 n = (Int32)poly.indices.size();
+                for (Int32 i = 0; i < n; i++)
+                {
+                    Int32 a = poly.indices[i];
+                    Int32 b = poly.indices[(i + 1) % n];
+                    adj[a].push_back(b);
+                    adj[b].push_back(a);
+                }
+            }
+
+            // BFS from point 0, propagating UV offsets
+            std::vector<Float> offU(ptCount, 0.0), offV(ptCount, 0.0);
+            std::vector<bool> visited(ptCount, false);
+            std::vector<Int32> queue;
+            queue.push_back(0);
+            visited[0] = true;
+            while (!queue.empty())
+            {
+                Int32 cur = queue.back();
+                queue.pop_back();
+                for (Int32 nb : adj[cur])
+                {
+                    if (nb < 0 || nb >= ptCount || visited[nb]) continue;
+                    visited[nb] = true;
+                    // Compute delta, wrap to [-0.5..0.5]
+                    Float du = (pts2d[nb].first  + offU[nb]) - (pts2d[cur].first  + offU[cur]);
+                    Float dv = (pts2d[nb].second + offV[nb]) - (pts2d[cur].second + offV[cur]);
+                    du = du - std::floor(du + 0.5);
+                    dv = dv - std::floor(dv + 0.5);
+                    // Set offset so that nb's UV + offset is within 0.5 of cur's
+                    offU[nb] = offU[cur] + du - (pts2d[nb].first - pts2d[cur].first);
+                    offV[nb] = offV[cur] + dv - (pts2d[nb].second - pts2d[cur].second);
+                    queue.push_back(nb);
+                }
+            }
+            // Apply offsets and wrap to [0..1]
+            for (Int32 i = 0; i < ptCount; i++)
+            {
+                Float u = pts2d[i].first + offU[i];
+                Float v = pts2d[i].second + offV[i];
+                u = u - std::floor(u);
+                v = v - std::floor(v);
+                pts2d[i] = { u, v };
+            }
+        }
+
         // Skip normalize/autofit/transform -- UV is already in [0..1].
         outProjected.boundsMinX = 0.0; outProjected.boundsMinY = 0.0;
         outProjected.boundsMaxX = 1.0; outProjected.boundsMaxY = 1.0;
@@ -195,8 +258,7 @@ void GeometryProjector::Project(const CollectedGeometry& geometry,
         outProjected.closedSplines = geometry.closed_splines;
         ApplyClipping(outProjected);
 
-        // Free the ray collider (allocated per Project() call). The UVWTag
-        // pointer is not owned (it belongs to the target object).
+        // Free the ray collider (allocated per Project() call).
         if (m_rayCollider)
         {
             GeRayCollider* rc = static_cast<GeRayCollider*>(m_rayCollider);
@@ -651,28 +713,37 @@ Bool GeometryProjector::InitUVFollow(const ProjectionSettings& settings,
 std::pair<Float,Float> GeometryProjector::ProjectUVFollow(const Vector& pt,
                                                             const ProjectionSettings& settings)
 {
-    if (!m_uvFollowReady) return {m_anchorU, m_anchorV};
+    if (!m_uvFollowReady || !m_rayCollider || !m_uvwTag) return {0.5, 0.5};
 
-    // Flat-project the point (preserves source shape).
-    Vector d = pt - m_flatOrigin;
-    Float flatX = Dot(d, m_flatRight);
-    Float flatY = Dot(d, m_flatUp);
+    GeRayCollider* rc = static_cast<GeRayCollider*>(m_rayCollider);
+    UVWTag* uvwTag = static_cast<UVWTag*>(m_uvwTag);
 
-    // Normalize relative to the TARGET's diameter, so the silhouette is
-    // proportional to (sourceSize / targetSize). A 1-unit cube on a 10-unit
-    // sphere occupies ~10% of UV space -- small enough to not wrap/duplicate.
-    Float normU = (flatX - m_flatCentroidX) / m_flatRangeX;
-    Float normV = (flatY - m_flatCentroidY) / m_flatRangeY;
+    // Ray-cast from the source point toward the target center. The nearest
+    // hit gives the point on the target surface facing the source.
+    Vector localP = m_targetInvMg * pt;
+    Vector localTgt = m_targetInvMg * m_targetCenter;
+    Vector dir = localTgt - localP;
+    Float len = dir.GetLength();
+    if (len < 1e-7) return {0.5, 0.5};
+    dir = dir / len;
+    Float rayLen = len + 100.0;
 
-    Float u = m_anchorU + normU;
-    Float v = m_anchorV + normV;
+    if (!rc->Intersect(localP, dir, rayLen, false)) return {0.5, 0.5};
+    GeRayColResult res;
+    if (!rc->GetNearestIntersection(&res) || res.face_id < 0) return {0.5, 0.5};
 
-    // Clamp to [0..1] (don't wrap -- wrapping causes duplication). Points
-    // outside [0..1] are simply clipped by the rasterizer's UV clipping.
-    if (u < 0.0) u = 0.0; else if (u > 1.0) u = 1.0;
-    if (v < 0.0) v = 0.0; else if (v > 1.0) v = 1.0;
+    // Sample UV at hit using barycentric coordinates
+    UVWStruct us = uvwTag->GetSlow(res.face_id);
+    Float u = res.barrycoords.x;
+    Float v = res.barrycoords.y;
+    Bool secondHalf = (res.tri_face_id < 0);
+    Vector uvw;
+    if (!secondHalf)
+        uvw = us.a + (us.b - us.a) * u + (us.c - us.a) * v;
+    else
+        uvw = us.a + (us.c - us.a) * u + (us.d - us.a) * v;
 
-    return { u, v };
+    return { uvw.x, uvw.y };
 }
 
 std::pair<Float,Float> GeometryProjector::ProjectPoint(const Vector& pt,
