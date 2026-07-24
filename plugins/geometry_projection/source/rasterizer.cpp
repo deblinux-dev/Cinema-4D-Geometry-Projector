@@ -544,7 +544,8 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
 BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& collected,
                                                      const ProjectionSettings& settings,
                                                      const std::vector<Vector>& uvFollowLookup,
-                                                     Int32 lookupResolution)
+                                                     Int32 lookupResolution,
+                                                     const std::map<BaseObject*, BaseObject*>& dirSources)
 {
     m_width  = settings.previewResolution;
     m_height = settings.previewResolution;
@@ -556,159 +557,152 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
     Int32 ptCount = (Int32)collected.points.size();
     if (ptCount == 0) return Flush();
 
-    // ---- Compute source center and flat projection basis ----
-    Vector sourceCenter(0);
-    for (Int32 i = 0; i < ptCount; i++)
-        sourceCenter += collected.points[i];
-    sourceCenter /= (Float)ptCount;
-
-    Vector fwd = settings.targetBoundsCenter - sourceCenter;
-    Float fwdLen = fwd.GetLength();
-    if (fwdLen < 1e-7) fwd = Vector(0, 0, 1);
-    else fwd = fwd / fwdLen;
-
-    Vector right = Cross(Vector(0, 1, 0), fwd);
-    if (right.GetLength() < 1e-6)
-        right = Cross(Vector(1, 0, 0), fwd);
-    right.Normalize();
-    Vector up = Cross(fwd, right);
-    up.Normalize();
-
-    // ---- Source bounds on the plane ----
-    Float srcMinX =  std::numeric_limits<Float>::max();
-    Float srcMinY =  std::numeric_limits<Float>::max();
-    Float srcMaxX = -std::numeric_limits<Float>::max();
-    Float srcMaxY = -std::numeric_limits<Float>::max();
-    for (const Vector& p : collected.points)
+    // Group points and geometry by owner for per-object projection
+    // Each owner can have its own direction source (per-object decals)
+    std::map<BaseObject*, std::vector<Int32>> ownerPoints;
+    for (size_t i = 0; i < collected.points.size(); i++)
     {
-        Vector d = p - sourceCenter;
-        Float fx = Dot(d, right);
-        Float fy = Dot(d, up);
-        if (fx < srcMinX) srcMinX = fx;
-        if (fx > srcMaxX) srcMaxX = fx;
-        if (fy < srcMinY) srcMinY = fy;
-        if (fy > srcMaxY) srcMaxY = fy;
+        // Find owner by checking lines/polygons that reference this point
+        // For simplicity, build owner→points from closed_splines + polygons
     }
-    Float padX = (srcMaxX - srcMinX) * 0.05;
-    Float padY = (srcMaxY - srcMinY) * 0.05;
-    srcMinX -= padX; srcMaxX += padX;
-    srcMinY -= padY; srcMaxY += padY;
-    Float rangeX = srcMaxX - srcMinX;
-    Float rangeY = srcMaxY - srcMinY;
-    if (rangeX < 1e-6) rangeX = 1.0;
-    if (rangeY < 1e-6) rangeY = 1.0;
+    // Build owner→point indices from all geometry
+    for (const auto& line : collected.lines)
+    {
+        ownerPoints[line.ownerObj].push_back(line.v0);
+        ownerPoints[line.ownerObj].push_back(line.v1);
+    }
+    for (const auto& poly : collected.polygons)
+        for (Int32 idx : poly.indices)
+            ownerPoints[poly.ownerObj].push_back(idx);
+    for (const auto& sp : collected.closed_splines)
+        for (Int32 idx : sp.indices)
+            ownerPoints[sp.ownerObj].push_back(idx);
 
-    // ---- Stage 1: render source orthographically onto temp bitmap ----
+    // Deduplicate
+    for (auto& [owner, pts] : ownerPoints)
+    {
+        std::sort(pts.begin(), pts.end());
+        pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+    }
+
+    // Helper: compute per-owner projection basis
+    auto computeBasis = [&](BaseObject* owner, Vector& center, Vector& fwd, Vector& right, Vector& up) -> bool {
+        auto it = ownerPoints.find(owner);
+        if (it == ownerPoints.end() || it->second.empty()) return false;
+
+        // Compute center
+        center = Vector(0);
+        for (Int32 idx : it->second)
+            center += collected.points[idx];
+        center /= (Float)it->second.size();
+
+        // Direction: from dirSource (if set) to target center, else from center to target
+        Vector dirOrigin = center;
+        auto dsIt = dirSources.find(owner);
+        if (dsIt != dirSources.end() && dsIt->second)
+            dirOrigin = dsIt->second->GetMg().off;
+
+        fwd = settings.targetBoundsCenter - dirOrigin;
+        Float fwdLen = fwd.GetLength();
+        if (fwdLen < 1e-7) fwd = Vector(0, 0, 1);
+        else fwd = fwd / fwdLen;
+
+        right = Cross(Vector(0, 1, 0), fwd);
+        if (right.GetLength() < 1e-6)
+            right = Cross(Vector(1, 0, 0), fwd);
+        right.Normalize();
+        up = Cross(fwd, right);
+        up.Normalize();
+        return true;
+    };
+
+    // For each owner, render source onto temp bitmap and sample UV lookup
     Int32 tw = m_width, th = m_height;
-    std::vector<uint8_t> tempRgba((size_t)tw * th * 4, 0);
-    std::vector<uint8_t> tempFilled((size_t)tw * th, 0);
-
     Int32 alpha = ClampI((Int32)(settings.opacity * 255.0), 0, 255);
-
-    auto toPlane = [&](const Vector& wp, Float& px, Float& py) {
-        Vector d = wp - sourceCenter;
-        px = Dot(d, right);
-        py = Dot(d, up);
-    };
-    auto toTempX = [&](Float px) -> Int32 {
-        return (Int32)((px - srcMinX) / rangeX * (tw - 1) + 0.5);
-    };
-    auto toTempY = [&](Float py) -> Int32 {
-        return (Int32)((py - srcMinY) / rangeY * (th - 1) + 0.5);
-    };
-    auto setTempPixel = [&](Int32 tx, Int32 ty, Int32 r, Int32 g, Int32 b, Int32 a) {
-        if (tx < 0 || tx >= tw || ty < 0 || ty >= th) return;
-        size_t idx = (size_t)ty * tw + tx;
-        tempRgba[idx * 4 + 0] = (uint8_t)r;
-        tempRgba[idx * 4 + 1] = (uint8_t)g;
-        tempRgba[idx * 4 + 2] = (uint8_t)b;
-        tempRgba[idx * 4 + 3] = (uint8_t)a;
-        tempFilled[idx] = 1;
-    };
-
     auto to255v = [](const Vector& c) -> std::tuple<Int32,Int32,Int32> {
         return std::make_tuple(ClampI((Int32)(c.x * 255.0), 0, 255),
                                 ClampI((Int32)(c.y * 255.0), 0, 255),
                                 ClampI((Int32)(c.z * 255.0), 0, 255));
     };
 
-    // Fill polygons
-    auto shouldFill = [&](const CollectedPolygon& p) -> bool {
-        if (p.fillOverride) return p.fill;
-        return settings.drawFill;
-    };
-    auto fillTempPoly = [&](const std::vector<std::pair<Int32,Int32>>& corners,
-                             Int32 r, Int32 g, Int32 b, Int32 a) {
-        if (corners.size() < 3) return;
-        Int32 n = (Int32)corners.size();
-        Int32 minY = corners[0].second, maxY = corners[0].second;
-        for (Int32 i = 1; i < n; i++) {
-            if (corners[i].second < minY) minY = corners[i].second;
-            if (corners[i].second > maxY) maxY = corners[i].second;
-        }
-        minY = ClampI(minY, 0, th - 1);
-        maxY = ClampI(maxY, 0, th - 1);
-        for (Int32 y = minY; y <= maxY; y++) {
-            std::vector<Int32> xs;
-            for (Int32 i = 0; i < n; i++) {
-                Int32 j = (i + 1) % n;
-                Int32 ay = corners[i].second, by = corners[j].second;
-                Int32 ax = corners[i].first,  bx = corners[j].first;
-                if ((ay <= y && by > y) || (by <= y && ay > y))
-                    xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
-            }
-            std::sort(xs.begin(), xs.end());
-            for (size_t k = 0; k + 1 < xs.size(); k += 2) {
-                Int32 x0 = ClampI(xs[k], 0, tw - 1);
-                Int32 x1 = ClampI(xs[k+1], 0, tw - 1);
-                for (Int32 x = x0; x <= x1; x++)
-                    setTempPixel(x, y, r, g, b, a);
-            }
-        }
-    };
-
-    for (const auto& poly : collected.polygons) {
-        if ((Int32)poly.indices.size() < 3 || !shouldFill(poly)) continue;
-        auto [r, g, b] = to255v(poly.color);
-        std::vector<std::pair<Int32,Int32>> corners;
-        for (Int32 idx : poly.indices) {
-            if (idx < 0 || idx >= ptCount) continue;
-            Float px, py; toPlane(collected.points[idx], px, py);
-            corners.push_back({toTempX(px), toTempY(py)});
-        }
-        fillTempPoly(corners, r, g, b, alpha);
-    }
-    // Fill closed splines with EVEN-ODD rule (group by owner, fill all
-    // contours together so holes in letters like 'o' are preserved)
+    for (const auto& [owner, ptIndices] : ownerPoints)
     {
-        std::map<BaseObject*, std::vector<const CollectedPolygon*>> byOwnerUV;
-        for (const auto& sp : collected.closed_splines) {
-            if ((Int32)sp.indices.size() < 3 || !shouldFill(sp)) continue;
-            byOwnerUV[sp.ownerObj].push_back(&sp);
+        Vector center, fwd, right, up;
+        if (!computeBasis(owner, center, fwd, right, up)) continue;
+
+        // Source bounds on the plane
+        Float srcMinX =  std::numeric_limits<Float>::max();
+        Float srcMinY =  std::numeric_limits<Float>::max();
+        Float srcMaxX = -std::numeric_limits<Float>::max();
+        Float srcMaxY = -std::numeric_limits<Float>::max();
+        for (Int32 idx : ptIndices)
+        {
+            Vector d = collected.points[idx] - center;
+            Float fx = Dot(d, right);
+            Float fy = Dot(d, up);
+            if (fx < srcMinX) srcMinX = fx;
+            if (fx > srcMaxX) srcMaxX = fx;
+            if (fy < srcMinY) srcMinY = fy;
+            if (fy > srcMaxY) srcMaxY = fy;
         }
-        auto fillTempPolyMulti = [&](const std::vector<std::vector<std::pair<Int32,Int32>>>& contours,
-                                      Int32 r, Int32 g, Int32 b, Int32 a) {
-            if (contours.empty()) return;
-            Int32 minY = th, maxY = -1;
-            for (const auto& c : contours)
-                for (const auto& p : c) {
-                    if (p.second < minY) minY = p.second;
-                    if (p.second > maxY) maxY = p.second;
-                }
-            if (minY > maxY) return;
+        Float padX = (srcMaxX - srcMinX) * 0.05;
+        Float padY = (srcMaxY - srcMinY) * 0.05;
+        srcMinX -= padX; srcMaxX += padX;
+        srcMinY -= padY; srcMaxY += padY;
+        Float rangeX = srcMaxX - srcMinX;
+        Float rangeY = srcMaxY - srcMinY;
+        if (rangeX < 1e-6) rangeX = 1.0;
+        if (rangeY < 1e-6) rangeY = 1.0;
+
+        // Temp bitmap for this owner
+        std::vector<uint8_t> tempRgba((size_t)tw * th * 4, 0);
+        std::vector<uint8_t> tempFilled((size_t)tw * th, 0);
+
+        auto toPlane = [&](const Vector& wp, Float& px, Float& py) {
+            Vector d = wp - center;
+            px = Dot(d, right);
+            py = Dot(d, up);
+        };
+        auto toTempX = [&](Float px) -> Int32 {
+            return (Int32)((px - srcMinX) / rangeX * (tw - 1) + 0.5);
+        };
+        auto toTempY = [&](Float py) -> Int32 {
+            return (Int32)((py - srcMinY) / rangeY * (th - 1) + 0.5);
+        };
+        auto setTempPixel = [&](Int32 tx, Int32 ty, Int32 r, Int32 g, Int32 b, Int32 a) {
+            if (tx < 0 || tx >= tw || ty < 0 || ty >= th) return;
+            size_t idx = (size_t)ty * tw + tx;
+            tempRgba[idx * 4 + 0] = (uint8_t)r;
+            tempRgba[idx * 4 + 1] = (uint8_t)g;
+            tempRgba[idx * 4 + 2] = (uint8_t)b;
+            tempRgba[idx * 4 + 3] = (uint8_t)a;
+            tempFilled[idx] = 1;
+        };
+
+        // Fill polygons
+        auto shouldFill = [&](const CollectedPolygon& p) -> bool {
+            if (p.fillOverride) return p.fill;
+            return settings.drawFill;
+        };
+        auto fillTempPoly = [&](const std::vector<std::pair<Int32,Int32>>& corners,
+                                 Int32 r, Int32 g, Int32 b, Int32 a) {
+            if (corners.size() < 3) return;
+            Int32 n = (Int32)corners.size();
+            Int32 minY = corners[0].second, maxY = corners[0].second;
+            for (Int32 i = 1; i < n; i++) {
+                if (corners[i].second < minY) minY = corners[i].second;
+                if (corners[i].second > maxY) maxY = corners[i].second;
+            }
             minY = ClampI(minY, 0, th - 1);
             maxY = ClampI(maxY, 0, th - 1);
             for (Int32 y = minY; y <= maxY; y++) {
                 std::vector<Int32> xs;
-                for (const auto& c : contours) {
-                    Int32 n = (Int32)c.size();
-                    for (Int32 i = 0; i < n; i++) {
-                        Int32 j = (i + 1) % n;
-                        Int32 ay = c[i].second, by = c[j].second;
-                        Int32 ax = c[i].first,  bx = c[j].first;
-                        if ((ay <= y && by > y) || (by <= y && ay > y))
-                            xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
-                    }
+                for (Int32 i = 0; i < n; i++) {
+                    Int32 j = (i + 1) % n;
+                    Int32 ay = corners[i].second, by = corners[j].second;
+                    Int32 ax = corners[i].first,  bx = corners[j].first;
+                    if ((ay <= y && by > y) || (by <= y && ay > y))
+                        xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
                 }
                 std::sort(xs.begin(), xs.end());
                 for (size_t k = 0; k + 1 < xs.size(); k += 2) {
@@ -719,104 +713,158 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
                 }
             }
         };
-        for (const auto& [owner, contours] : byOwnerUV) {
-            auto [r, g, b] = to255v(contours[0]->color);
-            std::vector<std::vector<std::pair<Int32,Int32>>> pixelContours;
-            for (const auto* sp : contours) {
-                std::vector<std::pair<Int32,Int32>> corners;
-                for (Int32 idx : sp->indices) {
-                    if (idx < 0 || idx >= ptCount) continue;
-                    Float px, py; toPlane(collected.points[idx], px, py);
-                    corners.push_back({toTempX(px), toTempY(py)});
-                }
-                if (corners.size() >= 3) pixelContours.push_back(std::move(corners));
+
+        // Fill polygons for this owner
+        for (const auto& poly : collected.polygons) {
+            if (poly.ownerObj != owner) continue;
+            if ((Int32)poly.indices.size() < 3 || !shouldFill(poly)) continue;
+            auto [r, g, b] = to255v(poly.color);
+            std::vector<std::pair<Int32,Int32>> corners;
+            for (Int32 idx : poly.indices) {
+                if (idx < 0 || idx >= ptCount) continue;
+                Float px, py; toPlane(collected.points[idx], px, py);
+                corners.push_back({toTempX(px), toTempY(py)});
             }
-            fillTempPolyMulti(pixelContours, r, g, b, alpha);
+            fillTempPoly(corners, r, g, b, alpha);
         }
-    }
 
-    // Draw edges (boundary edges in silhouette mode)
-    std::map<std::pair<Int32,Int32>, Int32> edgePolyCount;
-    for (const auto& poly : collected.polygons) {
-        Int32 n = (Int32)poly.indices.size();
-        for (Int32 i = 0; i < n; i++) {
-            Int32 a = poly.indices[i], b = poly.indices[(i+1)%n];
-            auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
-            edgePolyCount[key]++;
+        // Fill closed splines with even-odd (group by owner — all same owner here)
+        {
+            std::vector<const CollectedPolygon*> contours;
+            for (const auto& sp : collected.closed_splines) {
+                if (sp.ownerObj != owner) continue;
+                if ((Int32)sp.indices.size() < 3 || !shouldFill(sp)) continue;
+                contours.push_back(&sp);
+            }
+            if (!contours.empty()) {
+                auto [r, g, b] = to255v(contours[0]->color);
+                std::vector<std::vector<std::pair<Int32,Int32>>> pixelContours;
+                for (const auto* sp : contours) {
+                    std::vector<std::pair<Int32,Int32>> corners;
+                    for (Int32 idx : sp->indices) {
+                        if (idx < 0 || idx >= ptCount) continue;
+                        Float px, py; toPlane(collected.points[idx], px, py);
+                        corners.push_back({toTempX(px), toTempY(py)});
+                    }
+                    if (corners.size() >= 3) pixelContours.push_back(std::move(corners));
+                }
+                // Multi-contour even-odd fill
+                if (!pixelContours.empty()) {
+                    Int32 minY = th, maxY = -1;
+                    for (const auto& c : pixelContours)
+                        for (const auto& p : c) {
+                            if (p.second < minY) minY = p.second;
+                            if (p.second > maxY) maxY = p.second;
+                        }
+                    if (minY <= maxY) {
+                        minY = ClampI(minY, 0, th - 1);
+                        maxY = ClampI(maxY, 0, th - 1);
+                        for (Int32 y = minY; y <= maxY; y++) {
+                            std::vector<Int32> xs;
+                            for (const auto& c : pixelContours) {
+                                Int32 n = (Int32)c.size();
+                                for (Int32 i = 0; i < n; i++) {
+                                    Int32 j = (i + 1) % n;
+                                    Int32 ay = c[i].second, by = c[j].second;
+                                    Int32 ax = c[i].first,  bx = c[j].first;
+                                    if ((ay <= y && by > y) || (by <= y && ay > y))
+                                        xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
+                                }
+                            }
+                            std::sort(xs.begin(), xs.end());
+                            for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                                Int32 x0 = ClampI(xs[k], 0, tw - 1);
+                                Int32 x1 = ClampI(xs[k+1], 0, tw - 1);
+                                for (Int32 x = x0; x <= x1; x++)
+                                    setTempPixel(x, y, r, g, b, alpha);
+                            }
+                        }
+                    }
+                }
+            }
         }
-    }
-    for (const auto& line : collected.lines) {
-        Int32 ia = line.v0, ib = line.v1;
-        if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
-        bool drawIt = false;
-        if (line.isSpline) drawIt = true;
-        else if (line.isPolygonEdge) {
-            auto key = (ia < ib) ? std::make_pair(ia, ib) : std::make_pair(ib, ia);
-            Int32 cnt = edgePolyCount[key];
-            drawIt = settings.drawOutline ? true : (cnt <= 1);
-        } else drawIt = true;
-        if (!drawIt) continue;
 
-        Float px0, py0, px1, py1;
-        toPlane(collected.points[ia], px0, py0);
-        toPlane(collected.points[ib], px1, py1);
-        Int32 tx0 = toTempX(px0), ty0 = toTempY(py0);
-        Int32 tx1 = toTempX(px1), ty1 = toTempY(py1);
-        auto [r, g, b] = to255v(line.color);
-        Float thick = settings.ScaleLineWidth(line.thickness, m_width);
-        Int32 half = (Int32)(thick * 0.5 + 0.5);
-        if (half < 0) half = 0;
-        // Bresenham
-        Int32 dx = Abs(tx1 - tx0), dy = Abs(ty1 - ty0);
-        Int32 sx = (tx0 < tx1) ? 1 : -1, sy = (ty0 < ty1) ? 1 : -1;
-        Int32 err = dx - dy, cx = tx0, cy = ty0;
-        while (true) {
-            for (Int32 oy = -half; oy <= half; oy++)
-                for (Int32 ox = -half; ox <= half; ox++)
-                    setTempPixel(cx + ox, cy + oy, r, g, b, alpha);
-            if (cx == tx1 && cy == ty1) break;
-            Int32 e2 = 2 * err;
-            if (e2 > -dy) { err -= dy; cx += sx; }
-            if (e2 <  dx) { err += dx; cy += sy; }
+        // Draw edges for this owner
+        std::map<std::pair<Int32,Int32>, Int32> edgePolyCount;
+        for (const auto& poly : collected.polygons) {
+            if (poly.ownerObj != owner) continue;
+            Int32 n = (Int32)poly.indices.size();
+            for (Int32 i = 0; i < n; i++) {
+                Int32 a = poly.indices[i], b = poly.indices[(i+1)%n];
+                auto key = (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
+                edgePolyCount[key]++;
+            }
         }
-    }
+        for (const auto& line : collected.lines) {
+            if (line.ownerObj != owner) continue;
+            Int32 ia = line.v0, ib = line.v1;
+            if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
+            bool drawIt = false;
+            if (line.isSpline) drawIt = true;
+            else if (line.isPolygonEdge) {
+                auto key = (ia < ib) ? std::make_pair(ia, ib) : std::make_pair(ib, ia);
+                Int32 cnt = edgePolyCount[key];
+                drawIt = settings.drawOutline ? true : (cnt <= 1);
+            } else drawIt = true;
+            if (!drawIt) continue;
 
-    // ---- Stage 2: for each UV pixel, lookup 3D → project onto source plane → sample temp ----
-    // This is the fast path: NO ray-casting. Just a table lookup + dot products.
-    for (Int32 fy = 0; fy < m_height; fy++) {
-        for (Int32 fx = 0; fx < m_width; fx++) {
-            // Map final bitmap pixel to lookup pixel
-            // Map final bitmap pixel to lookup pixel. V is flipped: bitmap
-            // y=0 is at top, UV v=0 is at bottom (lookup py=0 = v=0 = bottom).
-            Int32 lx = (Int32)((Float)fx / (Float)(m_width - 1) * (Float)(lookupResolution - 1) + 0.5);
-            Int32 ly = (Int32)((1.0 - (Float)fy / (Float)(m_height - 1)) * (Float)(lookupResolution - 1) + 0.5);
-            if (lx < 0 || lx >= lookupResolution || ly < 0 || ly >= lookupResolution) continue;
+            Float px0, py0, px1, py1;
+            toPlane(collected.points[ia], px0, py0);
+            toPlane(collected.points[ib], px1, py1);
+            Int32 tx0 = toTempX(px0), ty0 = toTempY(py0);
+            Int32 tx1 = toTempX(px1), ty1 = toTempY(py1);
+            auto [r, g, b] = to255v(line.color);
+            Float thick = settings.ScaleLineWidth(line.thickness, m_width);
+            Int32 half = (Int32)(thick * 0.5 + 0.5);
+            if (half < 0) half = 0;
+            Int32 dx = Abs(tx1 - tx0), dy = Abs(ty1 - ty0);
+            Int32 sx = (tx0 < tx1) ? 1 : -1, sy = (ty0 < ty1) ? 1 : -1;
+            Int32 err = dx - dy, cx = tx0, cy = ty0;
+            while (true) {
+                for (Int32 oy = -half; oy <= half; oy++)
+                    for (Int32 ox = -half; ox <= half; ox++)
+                        setTempPixel(cx + ox, cy + oy, r, g, b, alpha);
+                if (cx == tx1 && cy == ty1) break;
+                Int32 e2 = 2 * err;
+                if (e2 > -dy) { err -= dy; cx += sx; }
+                if (e2 <  dx) { err += dx; cy += sy; }
+            }
+        }
 
-            size_t lidx = (size_t)ly * lookupResolution + lx;
-            if (lidx >= uvFollowLookup.size()) continue;
+        // Stage 2: sample UV lookup for this owner
+        for (Int32 fy = 0; fy < m_height; fy++) {
+            for (Int32 fx = 0; fx < m_width; fx++) {
+                // Check if this pixel already has content from another owner
+                size_t fidx = (size_t)fy * m_width + fx;
+                if (m_alpha[fidx] > 0) continue; // already filled
 
-            Vector worldPos = uvFollowLookup[lidx];
-            // Skip sentinel (invalid UV pixel -- e.g. sphere poles where UVs degenerate)
-            if (worldPos.x > 1e29) continue;
-            // Project onto source plane
-            Vector d = worldPos - sourceCenter;
-            Float planeX = Dot(d, right);
-            Float planeY = Dot(d, up);
+                Int32 lx = (Int32)((Float)fx / (Float)(m_width - 1) * (Float)(lookupResolution - 1) + 0.5);
+                Int32 ly = (Int32)((1.0 - (Float)fy / (Float)(m_height - 1)) * (Float)(lookupResolution - 1) + 0.5);
+                if (lx < 0 || lx >= lookupResolution || ly < 0 || ly >= lookupResolution) continue;
 
-            // Convert to temp bitmap pixel
-            Int32 tx = (Int32)((planeX - srcMinX) / rangeX * (tw - 1) + 0.5);
-            Int32 ty = (Int32)((planeY - srcMinY) / rangeY * (th - 1) + 0.5);
-            if (tx < 0 || tx >= tw || ty < 0 || ty >= th) continue;
+                size_t lidx = (size_t)ly * lookupResolution + lx;
+                if (lidx >= uvFollowLookup.size()) continue;
 
-            size_t tidx = (size_t)ty * tw + tx;
-            if (!tempFilled[tidx]) continue;
+                Vector worldPos = uvFollowLookup[lidx];
+                if (worldPos.x > 1e29) continue;
 
-            // Write to final bitmap
-            size_t fidx = (size_t)fy * m_width + fx;
-            m_rgb[fidx * 3 + 0] = tempRgba[tidx * 4 + 0];
-            m_rgb[fidx * 3 + 1] = tempRgba[tidx * 4 + 1];
-            m_rgb[fidx * 3 + 2] = tempRgba[tidx * 4 + 2];
-            m_alpha[fidx] = tempRgba[tidx * 4 + 3];
+                // Project onto THIS owner's source plane
+                Vector d = worldPos - center;
+                Float planeX = Dot(d, right);
+                Float planeY = Dot(d, up);
+
+                Int32 tx = (Int32)((planeX - srcMinX) / rangeX * (tw - 1) + 0.5);
+                Int32 ty = (Int32)((planeY - srcMinY) / rangeY * (th - 1) + 0.5);
+                if (tx < 0 || tx >= tw || ty < 0 || ty >= th) continue;
+
+                size_t tidx = (size_t)ty * tw + tx;
+                if (!tempFilled[tidx]) continue;
+
+                m_rgb[fidx * 3 + 0] = tempRgba[tidx * 4 + 0];
+                m_rgb[fidx * 3 + 1] = tempRgba[tidx * 4 + 1];
+                m_rgb[fidx * 3 + 2] = tempRgba[tidx * 4 + 2];
+                m_alpha[fidx] = tempRgba[tidx * 4 + 3];
+            }
         }
     }
 

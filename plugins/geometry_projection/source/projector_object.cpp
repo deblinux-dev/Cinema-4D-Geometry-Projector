@@ -352,7 +352,8 @@ void GeometryProjectorObject::DoUpdate(BaseObject* op, BaseDocument* doc, Hierar
                 Rasterizer rasterizer;
                 newBitmap = rasterizer.RasterizeUVFollowApproachA(
                     cache->geometry, settings,
-                    cache->uvFollowLookup, cache->uvFollowResolution);
+                    cache->uvFollowLookup, cache->uvFollowResolution,
+                    cache->geometry.uvFollowDirSources);
             }
             else
             {

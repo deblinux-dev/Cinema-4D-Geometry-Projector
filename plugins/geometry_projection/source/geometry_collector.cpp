@@ -76,6 +76,15 @@ void GeometryCollector::CollectObject(BaseObject* obj, BaseDocument* doc, Int32 
                 if (!clips.empty())
                     m_geometry.clipSources[obj] = std::move(clips);
             }
+
+            // Read per-object UV-follow direction source. If set, this object
+            // is projected along the direction from this linked object toward
+            // the target center (orthographic parallel rays). Allows each
+            // source object to have its own projection direction — like
+            // individual decals from different sides.
+            BaseObject* dirSource = static_cast<BaseObject*>(td->GetLink(PROJTAG_DIR_SOURCE, doc, Obase));
+            if (dirSource)
+                m_geometry.uvFollowDirSources[obj] = dirSource;
         }
     }
 

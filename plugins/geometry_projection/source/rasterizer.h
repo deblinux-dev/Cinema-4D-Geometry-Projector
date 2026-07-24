@@ -22,14 +22,14 @@ public:
     // UV-follow Approach A: UV→3D lookup + orthographic source bitmap.
     // uvFollowLookup is a precomputed table (resolution×resolution) mapping
     // each UV pixel to the 3D world position on the target surface.
-    // The rasterizer renders source orthographically onto a temp bitmap,
-    // then for each UV pixel: lookup 3D → project onto source plane →
-    // sample temp bitmap → write to final bitmap. Fast (no ray-casting
-    // per pixel) and seamless (each UV pixel independent).
+    // dirSources maps each source object to an optional per-object direction
+    // source (if set, that object is projected from dirSource→target instead
+    // of sourceCenter→target).
     BaseBitmap* RasterizeUVFollowApproachA(const CollectedGeometry& collected,
                                             const ProjectionSettings& settings,
                                             const std::vector<Vector>& uvFollowLookup,
-                                            Int32 lookupResolution);
+                                            Int32 lookupResolution,
+                                            const std::map<BaseObject*, BaseObject*>& dirSources);
 
 private:
     Int32 m_width  = 0;

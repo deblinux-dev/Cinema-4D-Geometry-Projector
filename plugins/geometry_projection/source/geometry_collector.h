@@ -14,11 +14,8 @@
 // isSpline marks segments that belong to a spline (vs polygon edges). Spline
 // segments get round caps at EVERY vertex to avoid gaps at corners.
 // isPolygonEdge marks edges that come from polygon topology (vs spline).
-// The rasterizer uses this to distinguish 'silhouette' (boundary edges) from
-// 'all edges' for the 3 draw modes.
 // ownerObj identifies which source object this line came from (used for the
-// clipping pass: lines of an object are clipped against its clip source's
-// projected silhouette).
+// clipping pass and per-object UV-follow direction).
 struct CollectedLine
 {
     Int32  v0, v1;
@@ -30,8 +27,6 @@ struct CollectedLine
 };
 
 // A polygon (triangle or quad) with per-object color and fill override.
-// fillOverride = true means use 'fill' instead of the global Draw Fill setting.
-// ownerObj identifies the source object (for the clipping pass).
 struct CollectedPolygon
 {
     std::vector<Int32> indices;
@@ -50,11 +45,14 @@ struct CollectedGeometry
     std::vector<CollectedPolygon> closed_splines;
 
     // For each source object, the list of objects whose projected silhouette
-    // should clip it. Populated by the collector from the
-    // ProjectionSettingsTag's PROJTAG_CLIP_SOURCES InExclude list.
-    // The clipping pass (in GeometryProjector::Project) uses this to clip the
-    // object's polygons/lines against the clip source's projected silhouette.
+    // should clip it.
     std::map<BaseObject*, std::vector<BaseObject*>> clipSources;
+
+    // For each source object, an optional per-object UV-follow direction
+    // source. If set, this object is projected along the direction from
+    // the direction source toward the target center (orthographic parallel
+    // rays). If not set, the global Geometry Projector direction is used.
+    std::map<BaseObject*, BaseObject*> uvFollowDirSources;
 
     void Clear()
     {
@@ -63,6 +61,7 @@ struct CollectedGeometry
         polygons.clear();
         closed_splines.clear();
         clipSources.clear();
+        uvFollowDirSources.clear();
     }
 };
 

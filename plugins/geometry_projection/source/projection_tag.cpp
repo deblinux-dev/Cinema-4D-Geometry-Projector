@@ -20,6 +20,7 @@ Bool ProjectionSettingsTag::Init(GeListNode* node)
     data->SetFloat(PROJTAG_THICKNESS, 2.0);
     data->SetBool(PROJTAG_OVERRIDE_FILL, false);
     data->SetBool(PROJTAG_FILL, false);
+    data->SetLink(PROJTAG_DIR_SOURCE, nullptr);
 
     return true;
 }
