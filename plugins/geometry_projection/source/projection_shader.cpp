@@ -157,17 +157,35 @@ Vector ProjectionShader::SamplePixelData(Float u, Float v) const
     if (u < 0.0) u = 0.0; else if (u > 1.0) u = 1.0;
     if (v < 0.0) v = 0.0; else if (v > 1.0) v = 1.0;
 
-    Int32 px = (Int32)(u * (Float)(m_bitmapWidth  - 1) + 0.5);
+    // Bilinear interpolation for anti-aliased, smooth edges at any render
+    // resolution. Instead of nearest-neighbor (which gives jagged "staircase"
+    // edges), we sample the 4 nearest pixels and blend by fractional position.
+    // This produces smooth lines even when the bitmap is lower resolution
+    // than the render.
+    Float fx = u * (Float)(m_bitmapWidth  - 1);
+    Float fy = (1.0 - v) * (Float)(m_bitmapHeight - 1);
 
-    // Оптимизация: Корректное обратное преобразование оси V для устранения перевернутой текстуры
-    Int32 py = (Int32)((1.0 - v) * (Float)(m_bitmapHeight - 1) + 0.5);
+    Int32 x0 = (Int32)fx;
+    Int32 y0 = (Int32)fy;
+    Int32 x1 = (x0 + 1 < m_bitmapWidth)  ? x0 + 1 : x0;
+    Int32 y1 = (y0 + 1 < m_bitmapHeight) ? y0 + 1 : y0;
 
-    if (px < 0) px = 0; else if (px >= m_bitmapWidth)  px = m_bitmapWidth  - 1;
-    if (py < 0) py = 0; else if (py >= m_bitmapHeight) py = m_bitmapHeight - 1;
+    Float tx = fx - (Float)x0;
+    Float ty = fy - (Float)y0;
 
-    const uint8_t* p = m_pixelData.data() + (py * m_bitmapWidth + px) * 3;
+    auto getPixel = [&](Int32 x, Int32 y) -> Vector {
+        const uint8_t* p = m_pixelData.data() + (y * m_bitmapWidth + x) * 3;
+        return Vector(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+    };
 
-    return Vector(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+    Vector c00 = getPixel(x0, y0);
+    Vector c10 = getPixel(x1, y0);
+    Vector c01 = getPixel(x0, y1);
+    Vector c11 = getPixel(x1, y1);
+
+    Vector c0 = c00 * (1.0 - tx) + c10 * tx;
+    Vector c1 = c01 * (1.0 - tx) + c11 * tx;
+    return c0 * (1.0 - ty) + c1 * ty;
 }
 
 // ==================== ApplyBlend ====================

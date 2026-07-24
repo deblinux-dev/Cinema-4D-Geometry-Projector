@@ -189,40 +189,72 @@ void GeometryCollector::CollectFromCache(BaseObject* cacheObj, const Matrix& wor
     }
     else if (type == Oline)
     {
-        // LineObject: parametric spline primitives (Circle, Rectangle, Arc)
-        // generate a LineObject in their cache with interpolated points.
-        // LineObject has points but no segments; treat it as a linear spline.
+        // LineObject: parametric spline primitives (Circle, Rectangle, Arc,
+        // Text) generate a LineObject in their cache with interpolated points.
+        // LineObject has segments (like SplineObject) that separate distinct
+        // contours (e.g. individual letters in a text spline). Without
+        // respecting segments, all points get connected, creating spurious
+        // lines between letters.
         LineObject* lineObj = static_cast<LineObject*>(cacheObj);
         Int32 ptCount = lineObj->GetPointCount();
-        if (ptCount >= 2)
+        Int32 segCount = lineObj->GetSegmentCount();
+        if (ptCount >= 2 && segCount > 0)
         {
+            const Vector* pts = lineObj->GetPointR();
+            const Segment* segs = lineObj->GetSegmentR();
+            if (pts && segs)
+            {
+                Int32 startPt = 0;
+                for (Int32 s = 0; s < segCount; s++)
+                {
+                    Int32 segPts = segs[s].cnt;
+                    Bool closed = segs[s].closed;
+                    if (segPts < 2) { startPt += segPts; continue; }
+
+                    Int32 baseIdx = (Int32)m_geometry.points.size();
+                    for (Int32 i = 0; i < segPts; i++)
+                        m_geometry.points.push_back(worldMg * pts[startPt + i]);
+
+                    // Line segments
+                    for (Int32 i = 0; i < segPts - 1; i++)
+                        m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
+                                                     m_currentColor, m_currentThickness,
+                                                     true, false, m_currentOwner });
+                    if (closed)
+                        m_geometry.lines.push_back({ baseIdx + segPts - 1, baseIdx,
+                                                     m_currentColor, m_currentThickness,
+                                                     true, false, m_currentOwner });
+
+                    // Add as closed spline for fill rendering (even-odd rule)
+                    if (closed && segPts >= 3)
+                    {
+                        std::vector<Int32> splinePoly;
+                        splinePoly.reserve(segPts);
+                        for (Int32 i = 0; i < segPts; i++)
+                            splinePoly.push_back(baseIdx + i);
+                        m_geometry.closed_splines.push_back({ std::move(splinePoly),
+                                                              m_currentColor,
+                                                              m_currentFillOverride,
+                                                              m_currentFill,
+                                                              m_currentOwner });
+                    }
+                    startPt += segPts;
+                }
+            }
+        }
+        else if (ptCount >= 2)
+        {
+            // Fallback: no segments, treat as single contour
             const Vector* pts = lineObj->GetPointR();
             if (pts)
             {
                 Int32 baseIdx = (Int32)m_geometry.points.size();
                 for (Int32 i = 0; i < ptCount; i++)
                     m_geometry.points.push_back(worldMg * pts[i]);
-
-                // Line segments (for outline rendering)
                 for (Int32 i = 0; i < ptCount - 1; i++)
                     m_geometry.lines.push_back({ baseIdx + i, baseIdx + i + 1,
                                                  m_currentColor, m_currentThickness,
                                                  true, false, m_currentOwner });
-                // Close the loop (parametric splines like Circle are closed)
-                m_geometry.lines.push_back({ baseIdx + ptCount - 1, baseIdx,
-                                             m_currentColor, m_currentThickness,
-                                             true, false, m_currentOwner });
-
-                // Add as closed spline for fill rendering
-                std::vector<Int32> splinePoly;
-                splinePoly.reserve(ptCount);
-                for (Int32 i = 0; i < ptCount; i++)
-                    splinePoly.push_back(baseIdx + i);
-                m_geometry.closed_splines.push_back({ std::move(splinePoly),
-                                                      m_currentColor,
-                                                      m_currentFillOverride,
-                                                      m_currentFill,
-                                                      m_currentOwner });
             }
         }
     }
