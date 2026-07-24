@@ -446,7 +446,12 @@ void GeometryProjectorObject::BuildUVFollowLookup(BaseObject* op,
     Matrix mg = surfObj->GetMg();
 
     Int32 res = settings.previewResolution;
-    cache->uvFollowLookup.assign((size_t)res * res, Vector(0));
+    // Initialize with a sentinel value (very large) for pixels where no
+    // polygon contains the UV (e.g. UV poles on a sphere where UVs degenerate).
+    // The rasterizer checks for this sentinel and skips those pixels, preventing
+    // the "sun rays" artifact at poles.
+    Vector sentinel(1e30, 1e30, 1e30);
+    cache->uvFollowLookup.assign((size_t)res * res, sentinel);
     cache->uvFollowResolution = res;
 
     // Build UV grid for spatial indexing: divide [0..1]² into 32×32 cells.

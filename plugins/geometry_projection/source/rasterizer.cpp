@@ -286,31 +286,135 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
             ScanlineFill(corners, r, g, b, alpha);
     }
 
-    // Fill closed splines (per-object override applies too)
-    for (const auto& sp : projected.closedSplines)
+    // Fill closed splines using EVEN-ODD rule across all contours of the same
+    // owner. This correctly handles nested contours (e.g. letter 'o' has an
+    // outer outline and an inner hole — even-odd fill leaves the hole empty).
+    // Group closed_splines by owner, then fill all contours together.
     {
-        if ((Int32)sp.indices.size() < 3) continue;
-        if (!shouldFill(sp)) continue;
-        auto [r, g, b] = to255(sp.color);
-
-        std::vector<UVPoint> uvPoly;
-        uvPoly.reserve(sp.indices.size());
-        for (Int32 idx : sp.indices)
+        // Group by owner
+        std::map<BaseObject*, std::vector<const CollectedPolygon*>> byOwner;
+        for (const auto& sp : projected.closedSplines)
         {
-            if (idx >= 0 && idx < ptCount)
-                uvPoly.push_back(projected.points2d[idx]);
+            if ((Int32)sp.indices.size() < 3) continue;
+            if (!shouldFill(sp)) continue;
+            byOwner[sp.ownerObj].push_back(&sp);
         }
-        uvPoly = SH_ClipPolygon(std::move(uvPoly));
-        if (uvPoly.size() < 3) continue;
 
-        std::vector<std::pair<Int32,Int32>> corners;
-        corners.reserve(uvPoly.size());
-        for (const auto& uv : uvPoly)
-            corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
-        if (projected.clipMasks.find(sp.ownerObj) != projected.clipMasks.end())
-            maskedScanlineFill(corners, r, g, b, alpha, sp.ownerObj);
-        else
-            ScanlineFill(corners, r, g, b, alpha);
+        // Multi-contour scanline fill (even-odd rule)
+        auto scanlineFillMulti = [&](const std::vector<std::vector<std::pair<Int32,Int32>>>& contours,
+                                      Int32 r, Int32 g, Int32 b, Int32 a) {
+            if (contours.empty()) return;
+            // Find global Y range
+            Int32 minY = m_height, maxY = -1;
+            for (const auto& c : contours)
+                for (const auto& p : c) {
+                    if (p.second < minY) minY = p.second;
+                    if (p.second > maxY) maxY = p.second;
+                }
+            if (minY > maxY) return;
+            minY = ClampI(minY, 0, m_height - 1);
+            maxY = ClampI(maxY, 0, m_height - 1);
+
+            for (Int32 y = minY; y <= maxY; y++) {
+                std::vector<Int32> xs;
+                for (const auto& c : contours) {
+                    Int32 n = (Int32)c.size();
+                    for (Int32 i = 0; i < n; i++) {
+                        Int32 j = (i + 1) % n;
+                        Int32 ay = c[i].second, by = c[j].second;
+                        Int32 ax = c[i].first,  bx = c[j].first;
+                        if ((ay <= y && by > y) || (by <= y && ay > y))
+                            xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
+                    }
+                }
+                std::sort(xs.begin(), xs.end());
+                for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                    Int32 x0 = ClampI(xs[k], 0, m_width - 1);
+                    Int32 x1 = ClampI(xs[k + 1], 0, m_width - 1);
+                    for (Int32 x = x0; x <= x1; x++) {
+                        Int32 idx = y * m_width + x;
+                        m_rgb[idx * 3 + 0] = (uint8_t)r;
+                        m_rgb[idx * 3 + 1] = (uint8_t)g;
+                        m_rgb[idx * 3 + 2] = (uint8_t)b;
+                        m_alpha[idx] = (uint8_t)a;
+                    }
+                }
+            }
+        };
+
+        // Masked multi-contour fill (with clip mask check per pixel)
+        auto maskedScanlineFillMulti = [&](const std::vector<std::vector<std::pair<Int32,Int32>>>& contours,
+                                            Int32 r, Int32 g, Int32 b, Int32 a,
+                                            BaseObject* owner) {
+            if (contours.empty()) return;
+            Int32 minY = m_height, maxY = -1;
+            for (const auto& c : contours)
+                for (const auto& p : c) {
+                    if (p.second < minY) minY = p.second;
+                    if (p.second > maxY) maxY = p.second;
+                }
+            if (minY > maxY) return;
+            minY = ClampI(minY, 0, m_height - 1);
+            maxY = ClampI(maxY, 0, m_height - 1);
+
+            for (Int32 y = minY; y <= maxY; y++) {
+                std::vector<Int32> xs;
+                for (const auto& c : contours) {
+                    Int32 n = (Int32)c.size();
+                    for (Int32 i = 0; i < n; i++) {
+                        Int32 j = (i + 1) % n;
+                        Int32 ay = c[i].second, by = c[j].second;
+                        Int32 ax = c[i].first,  bx = c[j].first;
+                        if ((ay <= y && by > y) || (by <= y && ay > y))
+                            xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
+                    }
+                }
+                std::sort(xs.begin(), xs.end());
+                for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                    Int32 x0 = ClampI(xs[k], 0, m_width - 1);
+                    Int32 x1 = ClampI(xs[k + 1], 0, m_width - 1);
+                    for (Int32 x = x0; x <= x1; x++) {
+                        Float u = (Float)x / (Float)(m_width - 1);
+                        Float v = 1.0 - (Float)y / (Float)(m_height - 1);
+                        if (pointInMask(owner, u, v)) {
+                            Int32 idx = y * m_width + x;
+                            m_rgb[idx * 3 + 0] = (uint8_t)r;
+                            m_rgb[idx * 3 + 1] = (uint8_t)g;
+                            m_rgb[idx * 3 + 2] = (uint8_t)b;
+                            m_alpha[idx] = (uint8_t)a;
+                        }
+                    }
+                }
+            }
+        };
+
+        for (const auto& [owner, contours] : byOwner)
+        {
+            auto [r, g, b] = to255(contours[0]->color);
+            // Build pixel-space contour lists
+            std::vector<std::vector<std::pair<Int32,Int32>>> pixelContours;
+            for (const auto* sp : contours)
+            {
+                std::vector<UVPoint> uvPoly;
+                uvPoly.reserve(sp->indices.size());
+                for (Int32 idx : sp->indices) {
+                    if (idx >= 0 && idx < ptCount)
+                        uvPoly.push_back(projected.points2d[idx]);
+                }
+                uvPoly = SH_ClipPolygon(std::move(uvPoly));
+                if (uvPoly.size() < 3) continue;
+                std::vector<std::pair<Int32,Int32>> corners;
+                corners.reserve(uvPoly.size());
+                for (const auto& uv : uvPoly)
+                    corners.push_back({ UtoX(uv.first), VtoY(1.0 - uv.second) });
+                pixelContours.push_back(std::move(corners));
+            }
+            if (pixelContours.empty()) continue;
+            if (projected.clipMasks.find(owner) != projected.clipMasks.end())
+                maskedScanlineFillMulti(pixelContours, r, g, b, alpha, owner);
+            else
+                scanlineFillMulti(pixelContours, r, g, b, alpha);
+        }
     }
 
     // 2. Draw edges. Two modes:
@@ -574,16 +678,61 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
         }
         fillTempPoly(corners, r, g, b, alpha);
     }
-    for (const auto& sp : collected.closed_splines) {
-        if ((Int32)sp.indices.size() < 3 || !shouldFill(sp)) continue;
-        auto [r, g, b] = to255v(sp.color);
-        std::vector<std::pair<Int32,Int32>> corners;
-        for (Int32 idx : sp.indices) {
-            if (idx < 0 || idx >= ptCount) continue;
-            Float px, py; toPlane(collected.points[idx], px, py);
-            corners.push_back({toTempX(px), toTempY(py)});
+    // Fill closed splines with EVEN-ODD rule (group by owner, fill all
+    // contours together so holes in letters like 'o' are preserved)
+    {
+        std::map<BaseObject*, std::vector<const CollectedPolygon*>> byOwnerUV;
+        for (const auto& sp : collected.closed_splines) {
+            if ((Int32)sp.indices.size() < 3 || !shouldFill(sp)) continue;
+            byOwnerUV[sp.ownerObj].push_back(&sp);
         }
-        fillTempPoly(corners, r, g, b, alpha);
+        auto fillTempPolyMulti = [&](const std::vector<std::vector<std::pair<Int32,Int32>>>& contours,
+                                      Int32 r, Int32 g, Int32 b, Int32 a) {
+            if (contours.empty()) return;
+            Int32 minY = th, maxY = -1;
+            for (const auto& c : contours)
+                for (const auto& p : c) {
+                    if (p.second < minY) minY = p.second;
+                    if (p.second > maxY) maxY = p.second;
+                }
+            if (minY > maxY) return;
+            minY = ClampI(minY, 0, th - 1);
+            maxY = ClampI(maxY, 0, th - 1);
+            for (Int32 y = minY; y <= maxY; y++) {
+                std::vector<Int32> xs;
+                for (const auto& c : contours) {
+                    Int32 n = (Int32)c.size();
+                    for (Int32 i = 0; i < n; i++) {
+                        Int32 j = (i + 1) % n;
+                        Int32 ay = c[i].second, by = c[j].second;
+                        Int32 ax = c[i].first,  bx = c[j].first;
+                        if ((ay <= y && by > y) || (by <= y && ay > y))
+                            xs.push_back(ax + (Int32)((Float)(y - ay) * (Float)(bx - ax) / (Float)(by - ay)));
+                    }
+                }
+                std::sort(xs.begin(), xs.end());
+                for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                    Int32 x0 = ClampI(xs[k], 0, tw - 1);
+                    Int32 x1 = ClampI(xs[k+1], 0, tw - 1);
+                    for (Int32 x = x0; x <= x1; x++)
+                        setTempPixel(x, y, r, g, b, a);
+                }
+            }
+        };
+        for (const auto& [owner, contours] : byOwnerUV) {
+            auto [r, g, b] = to255v(contours[0]->color);
+            std::vector<std::vector<std::pair<Int32,Int32>>> pixelContours;
+            for (const auto* sp : contours) {
+                std::vector<std::pair<Int32,Int32>> corners;
+                for (Int32 idx : sp->indices) {
+                    if (idx < 0 || idx >= ptCount) continue;
+                    Float px, py; toPlane(collected.points[idx], px, py);
+                    corners.push_back({toTempX(px), toTempY(py)});
+                }
+                if (corners.size() >= 3) pixelContours.push_back(std::move(corners));
+            }
+            fillTempPolyMulti(pixelContours, r, g, b, alpha);
+        }
     }
 
     // Draw edges (boundary edges in silhouette mode)
@@ -637,14 +786,18 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
     for (Int32 fy = 0; fy < m_height; fy++) {
         for (Int32 fx = 0; fx < m_width; fx++) {
             // Map final bitmap pixel to lookup pixel
+            // Map final bitmap pixel to lookup pixel. V is flipped: bitmap
+            // y=0 is at top, UV v=0 is at bottom (lookup py=0 = v=0 = bottom).
             Int32 lx = (Int32)((Float)fx / (Float)(m_width - 1) * (Float)(lookupResolution - 1) + 0.5);
-            Int32 ly = (Int32)((Float)fy / (float)(m_height - 1) * (float)(lookupResolution - 1) + 0.5);
+            Int32 ly = (Int32)((1.0 - (Float)fy / (Float)(m_height - 1)) * (Float)(lookupResolution - 1) + 0.5);
             if (lx < 0 || lx >= lookupResolution || ly < 0 || ly >= lookupResolution) continue;
 
             size_t lidx = (size_t)ly * lookupResolution + lx;
             if (lidx >= uvFollowLookup.size()) continue;
 
             Vector worldPos = uvFollowLookup[lidx];
+            // Skip sentinel (invalid UV pixel -- e.g. sphere poles where UVs degenerate)
+            if (worldPos.x > 1e29) continue;
             // Project onto source plane
             Vector d = worldPos - sourceCenter;
             Float planeX = Dot(d, right);
