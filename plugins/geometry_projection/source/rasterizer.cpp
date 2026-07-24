@@ -141,8 +141,13 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
                                     const CollectedGeometry& collected,
                                     const ProjectionSettings& settings)
 {
-    m_width    = settings.previewResolution;
-    m_height   = settings.previewResolution;
+    // Supersampling: render at 2x resolution for smooth anti-aliased edges,
+    // then downsample in Flush(). This eliminates jagged "staircase" artifacts
+    // on diagonal lines and gives consistent line thickness at all angles.
+    m_outW     = settings.previewResolution;
+    m_outH     = settings.previewResolution;
+    m_width    = m_outW * m_ssFactor;
+    m_height   = m_outH * m_ssFactor;
     m_settings = settings;
 
     // Convert global colors to 0-255 (used for background, and as fallback
@@ -458,8 +463,16 @@ BaseBitmap* Rasterizer::Rasterize(const ProjectedGeometry& projected,
             bool drawThisLine = false;
             if (line.isSpline)
             {
-                // Spline segments are always drawn (they ARE the silhouette).
-                drawThisLine = true;
+                // Spline outlines: draw when drawOutline is on, OR when fill
+                // is off (so the silhouette is always visible in outline mode).
+                // When fill is on and outline is off, only the fill shows.
+                drawThisLine = settings.drawOutline || !settings.drawFill;
+                // But if this owner has fill override with fill=true, and
+                // outline is off, still don't draw the outline
+                auto fillIt = std::find_if(projected.closedSplines.begin(), projected.closedSplines.end(),
+                    [&](const CollectedPolygon& p) { return p.ownerObj == line.ownerObj; });
+                if (fillIt != projected.closedSplines.end() && fillIt->fillOverride && fillIt->fill && !settings.drawOutline)
+                    drawThisLine = false;
             }
             else if (line.isPolygonEdge)
             {
@@ -547,8 +560,10 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
                                                      Int32 lookupResolution,
                                                      const std::map<BaseObject*, BaseObject*>& dirSources)
 {
-    m_width  = settings.previewResolution;
-    m_height = settings.previewResolution;
+    m_outW     = settings.previewResolution;
+    m_outH     = settings.previewResolution;
+    m_width    = m_outW * m_ssFactor;
+    m_height   = m_outH * m_ssFactor;
     m_settings = settings;
     InitBuffers();
 
@@ -800,7 +815,9 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
             Int32 ia = line.v0, ib = line.v1;
             if (ia < 0 || ia >= ptCount || ib < 0 || ib >= ptCount) continue;
             bool drawIt = false;
-            if (line.isSpline) drawIt = true;
+            if (line.isSpline) {
+                drawIt = settings.drawOutline || !settings.drawFill;
+            }
             else if (line.isPolygonEdge) {
                 auto key = (ia < ib) ? std::make_pair(ia, ib) : std::make_pair(ib, ia);
                 Int32 cnt = edgePolyCount[key];
@@ -847,6 +864,15 @@ BaseBitmap* Rasterizer::RasterizeUVFollowApproachA(const CollectedGeometry& coll
 
                 Vector worldPos = uvFollowLookup[lidx];
                 if (worldPos.x > 1e29) continue;
+
+                // Backface culling: only sample UV pixels that face the
+                // direction source. fwd points from dirSource → target center.
+                // A point faces the source if Dot(point - targetCenter, fwd) < 0
+                // (it's on the opposite side of fwd, facing back toward source).
+                // This prevents the silhouette from appearing on the back side
+                // of cylinders/toruses.
+                Float facing = Dot(worldPos - settings.targetBoundsCenter, fwd);
+                if (facing > 0.0) continue; // back side — skip
 
                 // Project onto THIS owner's source plane
                 Vector d = worldPos - center;
@@ -1087,48 +1113,97 @@ void Rasterizer::DrawFilledSquare(Int32 cx, Int32 cy, Int32 half,
 
 BaseBitmap* Rasterizer::Flush()
 {
+    // If supersampling was used (m_outW < m_width), downsample by averaging
+    // m_ssFactor×m_ssFactor blocks. This gives smooth anti-aliased edges.
+    Int32 outW = (m_outW > 0) ? m_outW : m_width;
+    Int32 outH = (m_outH > 0) ? m_outH : m_height;
+
     BaseBitmap* bm = BaseBitmap::Alloc();
     if (!bm) return nullptr;
 
-    // Always create a 24-bit bitmap.
-    // For alpha support we add a separate channel rather than relying on
-    // bm->Init(w, h, 32) producing COLORMODE::ARGB (not guaranteed on all platforms).
-    IMAGERESULT ir = bm->Init(m_width, m_height, 24);
+    IMAGERESULT ir = bm->Init(outW, outH, 24);
     if (ir != IMAGERESULT::OK)
     {
         BaseBitmap::Free(bm);
         return nullptr;
     }
 
-    // Write RGB rows via SetPixelCnt (fast path)
-    std::vector<uint8_t> rowBuf(m_width * 3);
-    for (Int32 y = 0; y < m_height; y++)
+    // Write RGB rows (with downsampling if needed)
+    std::vector<uint8_t> rowBuf(outW * 3);
+    for (Int32 y = 0; y < outH; y++)
     {
-        Int32 base = y * m_width;
-        for (Int32 x = 0; x < m_width; x++)
+        for (Int32 x = 0; x < outW; x++)
         {
-            rowBuf[x * 3 + 0] = m_rgb[(base + x) * 3 + 0];
-            rowBuf[x * 3 + 1] = m_rgb[(base + x) * 3 + 1];
-            rowBuf[x * 3 + 2] = m_rgb[(base + x) * 3 + 2];
+            if (m_ssFactor > 1)
+            {
+                // Average m_ssFactor×m_ssFactor block
+                Int32 rSum = 0, gSum = 0, bSum = 0, aSum = 0, cnt = 0;
+                for (Int32 sy = 0; sy < m_ssFactor; sy++)
+                {
+                    for (Int32 sx = 0; sx < m_ssFactor; sx++)
+                    {
+                        Int32 px = x * m_ssFactor + sx;
+                        Int32 py = y * m_ssFactor + sy;
+                        if (px >= m_width || py >= m_height) continue;
+                        Int32 idx = py * m_width + px;
+                        rSum += m_rgb[idx * 3 + 0];
+                        gSum += m_rgb[idx * 3 + 1];
+                        bSum += m_rgb[idx * 3 + 2];
+                        aSum += m_alpha[idx];
+                        cnt++;
+                    }
+                }
+                if (cnt > 0)
+                {
+                    rowBuf[x * 3 + 0] = (uint8_t)(rSum / cnt);
+                    rowBuf[x * 3 + 1] = (uint8_t)(gSum / cnt);
+                    rowBuf[x * 3 + 2] = (uint8_t)(bSum / cnt);
+                }
+            }
+            else
+            {
+                Int32 idx = y * m_width + x;
+                rowBuf[x * 3 + 0] = m_rgb[idx * 3 + 0];
+                rowBuf[x * 3 + 1] = m_rgb[idx * 3 + 1];
+                rowBuf[x * 3 + 2] = m_rgb[idx * 3 + 2];
+            }
         }
-        bm->SetPixelCnt(0, y, m_width, rowBuf.data(), 3, COLORMODE::RGB, PIXELCNT::NONE);
+        bm->SetPixelCnt(0, y, outW, rowBuf.data(), 3, COLORMODE::RGB, PIXELCNT::NONE);
     }
 
-    // Write alpha channel if requested
+    // Write alpha channel if requested (with downsampling)
     if (m_settings.useAlpha)
     {
-        // AddChannel(isAlpha=true, isPremultiplied=true) -- matches SDK convention
         BaseBitmap* alphaBm = bm->AddChannel(true, true);
         if (alphaBm)
         {
-            std::vector<uint8_t> alphaRow(m_width);
-            for (Int32 y = 0; y < m_height; y++)
+            std::vector<uint8_t> alphaRow(outW);
+            for (Int32 y = 0; y < outH; y++)
             {
-                Int32 base = y * m_width;
-                for (Int32 x = 0; x < m_width; x++)
-                    alphaRow[x] = m_alpha[base + x];
-                alphaBm->SetPixelCnt(0, y, m_width, alphaRow.data(), 1, COLORMODE::GRAY, PIXELCNT::NONE);
-
+                for (Int32 x = 0; x < outW; x++)
+                {
+                    if (m_ssFactor > 1)
+                    {
+                        Int32 aSum = 0, cnt = 0;
+                        for (Int32 sy = 0; sy < m_ssFactor; sy++)
+                        {
+                            for (Int32 sx = 0; sx < m_ssFactor; sx++)
+                            {
+                                Int32 px = x * m_ssFactor + sx;
+                                Int32 py = y * m_ssFactor + sy;
+                                if (px >= m_width || py >= m_height) continue;
+                                aSum += m_alpha[py * m_width + px];
+                                cnt++;
+                            }
+                        }
+                        alphaRow[x] = (cnt > 0) ? (uint8_t)(aSum / cnt) : 0;
+                    }
+                    else
+                    {
+                        alphaRow[x] = m_alpha[y * m_width + x];
+                    }
+                }
+                alphaBm->SetPixelCnt(0, y, outW, alphaRow.data(), 1, COLORMODE::GRAY, PIXELCNT::NONE);
             }
         }
     }

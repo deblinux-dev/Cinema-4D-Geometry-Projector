@@ -34,6 +34,9 @@ public:
 private:
     Int32 m_width  = 0;
     Int32 m_height = 0;
+    Int32 m_outW   = 0;  // output (downsampled) width
+    Int32 m_outH   = 0;  // output (downsampled) height
+    Int32 m_ssFactor = 2; // supersampling factor (2 = 4x AA)
     ProjectionSettings m_settings;
 
     // Foreground / background colors, 0-255 each channel
